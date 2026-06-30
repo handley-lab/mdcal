@@ -6,7 +6,7 @@ pkgdesc='An mddb-backed personal calendar'
 arch=('any')
 url='https://github.com/handley-lab/mdcal'
 license=('MIT')
-depends=('python' 'python-mddb' 'python-icalendar' 'python-slugify' 'python-yaml' 'git')
+depends=('python' 'python-mddb' 'python-icalendar' 'python-slugify' 'python-yaml' 'python-dateutil' 'git')
 install=python-mdcal.install
 
 package() {
@@ -16,6 +16,7 @@ package() {
     python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
   install -Dm644 src/mdcal/__init__.py "$pkgdir/$purelib/mdcal/__init__.py"
   install -Dm644 src/mdcal/ics.py      "$pkgdir/$purelib/mdcal/ics.py"
+  install -Dm644 src/mdcal/window.py   "$pkgdir/$purelib/mdcal/window.py"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 tmpfiles.d/mdcal.conf "$pkgdir/usr/lib/tmpfiles.d/mdcal.conf"
   install -dm755 "$pkgdir/usr/bin"

@@ -66,11 +66,14 @@ carries `rrule` + `exdate` (a flat date list, top-level/indexed) + an `overrides
 `recurrence_id` (each: moved time / new title / `cancelled`).
 
 **Read-time resolution** (per visible window): expand the master's `rrule` → drop `exdate`s → for
-each `recurrence_id`, replace the generated instance with its override. Measured cost: **~41 ms to
-expand all 1,004 real masters across all 24 calendars, cached rule objects** (~61 ms cold,
-re-parsing every RRULE); flat across week/month/year windows (cost is the walk from rule start, not
-window size — even a 1950-rooted rule lands there). A real grid renders one or two decks → well
-under 20 ms. **Conclusion: read-time expansion is the model; no materialised instance cache.**
+each `recurrence_id`, suppress the generated instance (its exception card renders concretely at its own
+time). Implemented in `mdcal/window.py` (`events_in_window`). **Conclusion: read-time expansion is the
+model; no materialised instance cache.** Performance (measured on the live 442-master Research deck):
+the *stateless* primitive runs **~0.8–1.4 s/window** — dominated by parsing the ~442 rrules; it reads
+cards from the `entries.yaml_text` cache (not `db.read`, whose blob-scan is O(deck) on a flat deck). A
+bare rrule-expansion micro-benchmark is ~tens of ms, but parse+load is the real cost. Request-level
+caching (parsed masters keyed by deck HEAD) and an indexed `until_epoch` prefilter to skip expired
+masters live in the **grid layer**, which owns the navigation loop — not in this primitive.
 
 **Promotion.** An occurrence that accrues real content (notes, a write-up, its own attendees) is
 **promoted to its own card** keyed `uid + recurrence_id`, so it is independently FTS-findable and
@@ -142,8 +145,9 @@ Source = the Google Calendar **`.ics` export** (verified faithful: carries `UID`
 `STATUS`, `SEQUENCE`, `TRANSP`, `RRULE`, `RECURRENCE-ID`, `EXDATE` — all of which the Google API and
 its MCP drop; the API also returns expanded instances, not masters). The `.ics` *is* RFC 5545, so it
 maps ~1:1 onto VEVENT-shaped cards with least translation. Import parses with `icalendar` (an mdcal
-dep, never mddb); `python-dateutil` is a **future** dep for read-time recurrence *expansion*, not used
-by the importer (which only re-serialises the `RRULE` string). Each upstream `RECURRENCE-ID` component
+dep, never mddb); the importer only re-serialises the `RRULE` string, while **read-time recurrence
+expansion** (`mdcal/window.py`, `events_in_window`) uses `python-dateutil` to expand masters over a
+view window. Each upstream `RECURRENCE-ID` component
 is written as **its own card** keyed `uid+recurrence_id` (a Google export's overrides are
 content-bearing by construction); masters keep `rrule+exdate`; read-time resolution suppresses a
 master-generated instance when an exception card with that `uid+recurrence_id` exists. Import is
