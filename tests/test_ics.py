@@ -40,7 +40,7 @@ def test_plain(ics_sample):
     assert isinstance(card.yaml["dtstart_epoch"], int)
     assert card.yaml["location"] == "Room 1"
     assert "rrule" not in card.yaml and "recurrence_id" not in card.yaml
-    assert re.fullmatch(r"2024/plain-meeting-[0-9a-f]{12}\.md", card.relpath)
+    assert re.fullmatch(r"2024-01-15-plain-meeting-[0-9a-f]{12}\.md", card.relpath)
     assert "```ics" in card.body and "END:VEVENT" in card.body
 
 
@@ -73,7 +73,7 @@ def test_untitled():
     body = "UID:u1@x\nDTSTAMP:20260101T120000Z\nDTSTART:20240115T100000Z\nDTEND:20240115T110000Z"
     card = vevent_to_card(_one(body), "test")
     assert card.title == "(untitled)"
-    assert card.relpath.startswith("2024/untitled-")
+    assert card.relpath.startswith("2024-01-15-untitled-")
 
 
 def test_missing_dtend_timed():

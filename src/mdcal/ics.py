@@ -218,7 +218,7 @@ def _relpath(source, uid, recurrence_id, title, dtstart):
     ident = f"{source}\x00{uid}\x00{_ident(recurrence_id)}"
     digest = hashlib.sha1(ident.encode()).hexdigest()[:12]
     stub = slugify(title)[:40] or "untitled"
-    return f"{dtstart.year}/{stub}-{digest}.md"
+    return f"{dtstart.strftime('%Y-%m-%d')}-{stub}-{digest}.md"
 
 
 def _vevents(ics_path, uid, limit):
