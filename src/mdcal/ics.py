@@ -7,6 +7,7 @@ only through the public `mddb.MDDB` API and raw SQL over `db.conn`.
 """
 
 import argparse
+import collections
 import datetime as _dt
 import hashlib
 import re
@@ -14,8 +15,33 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import icalendar
+import mddb
 import yaml
 from slugify import slugify
+
+_IMPORTER_KEYS = (
+    "source",
+    "uid",
+    "recurrence_id",
+    "recurrence_id_epoch",
+    "dtstart",
+    "dtstart_epoch",
+    "dtend",
+    "dtend_epoch",
+    "all_day",
+    "tzid",
+    "status",
+    "transp",
+    "sequence",
+    "rrule",
+    "exdate",
+    "location",
+    "organizer",
+    "attendee_emails",
+    "conference_url",
+    "created",
+    "last_modified",
+)
 
 
 @dataclass
@@ -28,7 +54,7 @@ class RenderedCard:
         body: The card body (``DESCRIPTION`` plus a fenced ``ics`` VEVENT block).
         tags: The card tags (iCal ``CATEGORIES``), or an empty list.
         yaml: The flat layer YAML fields (``uid``, ``dtstart``, ``rrule`` …).
-        relpath: The deterministic ``<year>/<stub>-<hash>.md`` deck path.
+        relpath: The deterministic date-led ``YYYY-MM-DD-<stub>-<hash>.md`` deck path.
     """
 
     title: str
@@ -186,7 +212,7 @@ def vevent_to_card(vevent, source):
 
     tags = _categories(vevent)
     description = str(vevent["DESCRIPTION"]) if vevent.get("DESCRIPTION") else ""
-    ics_block = vevent.to_ical().decode().strip()
+    ics_block = vevent.to_ical().decode().replace("\r\n", "\n").strip()
     body = (f"{description}\n\n" if description else "") + f"```ics\n{ics_block}\n```\n"
 
     return RenderedCard(
@@ -253,6 +279,109 @@ def render_text(card):
     return f"---\n{dumped}---\n{card.body}"
 
 
+def _open_or_init(deck):
+    return mddb.MDDB(deck) if (Path(deck) / ".git").is_dir() else mddb.MDDB.init(deck)
+
+
+def _existing_map(db, source):
+    rows = db.conn.execute(
+        "SELECT e.id, us.value_str, rs.value_str "
+        "FROM entries e "
+        "JOIN entry_fields ss ON ss.entry_rowid=e.rowid AND ss.key='source' AND ss.value_str=? "
+        "JOIN entry_fields us ON us.entry_rowid=e.rowid AND us.key='uid' "
+        "LEFT JOIN entry_fields rs ON rs.entry_rowid=e.rowid AND rs.key='recurrence_id'",
+        (source,),
+    ).fetchall()
+    return {(uid, _ident(rid)): cid for cid, uid, rid in rows}
+
+
+def _unchanged(card, existing):
+    existing_importer = {k: v for k, v in existing.yaml.items() if k in _IMPORTER_KEYS}
+    return (
+        card.title == existing.title
+        and card.summary == existing.summary
+        and card.body == existing.body
+        and card.tags == existing.yaml.get("tags", [])
+        and card.yaml == existing_importer
+    )
+
+
+def import_ics(deck, ics_path, source, uid=None, limit=None):
+    """Idempotently import an `.ics` calendar into the mddb deck at `deck`.
+
+    Opens (or initialises) the deck, renders one card per VEVENT, and within a
+    per-year `db.editor` block creates new cards, updates changed ones, and skips
+    unchanged ones — keyed on ``source + uid + recurrence_id``. A year with no
+    creates/updates opens no editor block, so a clean re-import produces no commit.
+
+    Args:
+        deck: Path to the deck (created via `mddb.MDDB.init` if absent).
+        ics_path: Path to the source `.ics` file.
+        source: The calendar/source label written to each card's ``source`` field.
+        uid: Optional single iCal UID to restrict the import to.
+        limit: Optional cap on the number of VEVENTs imported.
+
+    Returns:
+        A ``{"created": int, "updated": int, "skipped": int}`` count summary.
+    """
+    db = _open_or_init(deck)
+    existing = _existing_map(db, source)
+    by_year = collections.defaultdict(list)
+    for vevent in _vevents(ics_path, uid, limit):
+        card = vevent_to_card(vevent, source)
+        by_year[card.yaml["dtstart"].year].append(card)
+
+    counts = {"created": 0, "updated": 0, "skipped": 0}
+    for year in sorted(by_year):
+        actions = []
+        year_skipped = 0
+        for card in by_year[year]:
+            cid = existing.get(
+                (card.yaml["uid"], _ident(card.yaml.get("recurrence_id")))
+            )
+            if cid is None:
+                actions.append((card, None))
+            elif _unchanged(card, db.read(cid)):
+                year_skipped += 1
+            else:
+                actions.append((card, cid))
+        counts["skipped"] += year_skipped
+        if not actions:
+            continue
+        year_created = year_updated = 0
+        with db.editor(rationale=f"import {source} {year}") as editor:
+            for card, cid in actions:
+                if cid is None:
+                    editor.create(
+                        title=card.title,
+                        summary=card.summary,
+                        tags=card.tags or None,
+                        body=card.body,
+                        relpath=card.relpath,
+                        yaml=card.yaml,
+                    )
+                    year_created += 1
+                else:
+                    existing_card = editor.read(cid)
+                    kept = {
+                        k: v
+                        for k, v in existing_card.yaml.items()
+                        if k not in _IMPORTER_KEYS
+                    }
+                    kept["title"] = card.title
+                    kept.update(card.yaml)
+                    existing_card.yaml = kept
+                    existing_card.body = card.body
+                    editor.update(
+                        existing_card, summary=card.summary, tags=card.tags or ()
+                    )
+                    year_updated += 1
+        counts["created"] += year_created
+        counts["updated"] += year_updated
+        print(f"  {year}: +{year_created} ~{year_updated} ={year_skipped}")
+    return counts
+
+
 def main(argv=None):
     """Run the `mdcal-import` console script.
 
@@ -271,14 +400,18 @@ def main(argv=None):
     parser.add_argument("--uid")
     args = parser.parse_args(argv)
 
-    events = _vevents(args.ics, args.uid, args.limit)
     if args.dry_run:
-        for vevent in events:
+        for vevent in _vevents(args.ics, args.uid, args.limit):
             card = vevent_to_card(vevent, args.source)
             print(f"# ===== {card.relpath} =====")
             print(render_text(card))
         return
-    raise NotImplementedError("deck writer lands in Phase 3")
+    if not args.deck:
+        parser.error("--deck is required unless --dry-run")
+    counts = import_ics(args.deck, args.ics, args.source, args.uid, args.limit)
+    print(
+        f"created={counts['created']} updated={counts['updated']} skipped={counts['skipped']}"
+    )
 
 
 if __name__ == "__main__":

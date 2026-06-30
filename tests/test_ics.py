@@ -2,10 +2,28 @@ import datetime as dt
 import re
 
 import icalendar
+import mddb
 import pytest
 import yaml
 
-from mdcal.ics import RenderedCard, _ident, main, render_text, vevent_to_card
+from mdcal.ics import (
+    RenderedCard,
+    _ident,
+    import_ics,
+    main,
+    render_text,
+    vevent_to_card,
+)
+
+
+def _count(deck, **field):
+    conn = mddb.MDDB(deck).conn
+    if not field:
+        return conn.execute("SELECT count(*) FROM entries").fetchone()[0]
+    ((key, value),) = field.items()
+    return conn.execute(
+        "SELECT count(*) FROM entry_fields WHERE key=? AND value_str=?", (key, value)
+    ).fetchone()[0]
 
 
 def _vevents(ics_text):
@@ -160,8 +178,83 @@ def test_main_dry_run_uid_filters(ics_sample, tmp_path, capsys):
     assert "Plain meeting" in out and "Conference trip" not in out
 
 
-def test_main_write_path_not_yet_implemented(ics_sample, tmp_path):
+def test_main_requires_deck_without_dry_run(ics_sample, tmp_path):
     ics = tmp_path / "research.ics"
     ics.write_text(ics_sample)
-    with pytest.raises(NotImplementedError):
-        main(["--source", "research", "--ics", str(ics), "--deck", str(tmp_path / "d")])
+    with pytest.raises(SystemExit):
+        main(["--source", "research", "--ics", str(ics)])
+
+
+def test_import_creates(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    counts = import_ics(deck, str(ics), "research")
+    assert counts == {"created": 4, "updated": 0, "skipped": 0}
+    assert _count(deck) == 4
+    assert _count(deck, rrule="FREQ=WEEKLY;COUNT=6;BYDAY=MO") == 1
+    assert _count(deck, recurrence_id="2024-01-15 13:00:00+00:00") == 1
+
+
+def test_import_idempotent_no_new_commit(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    head_before = mddb.MDDB(deck).head()
+    counts = import_ics(deck, str(ics), "research")
+    assert counts == {"created": 0, "updated": 0, "skipped": 4}
+    assert _count(deck) == 4
+    assert mddb.MDDB(deck).head() == head_before
+
+
+def test_import_updates_changed_without_duplicating(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    ics.write_text(ics_sample.replace("Plain meeting", "Plain meeting EDITED"))
+    counts = import_ics(deck, str(ics), "research")
+    assert counts["updated"] == 1 and counts["created"] == 0
+    assert _count(deck) == 4
+    title = (
+        mddb.MDDB(deck)
+        .conn.execute(
+            "SELECT e.title FROM entries e JOIN entry_fields f ON f.entry_rowid=e.rowid "
+            "WHERE f.key='uid' AND f.value_str='plain-1@example.com'"
+        )
+        .fetchone()[0]
+    )
+    assert title == "Plain meeting EDITED"
+
+
+def test_import_preserves_local_key_and_still_skips(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    db = mddb.MDDB(deck)
+    cid = db.conn.execute(
+        "SELECT e.id FROM entries e JOIN entry_fields f ON f.entry_rowid=e.rowid "
+        "WHERE f.key='uid' AND f.value_str='plain-1@example.com'"
+    ).fetchone()[0]
+    with db.editor(rationale="add a local key") as e:
+        card = e.read(cid)
+        card.yaml["notes"] = "hello"
+        e.update(card, summary=card.summary)
+    head = mddb.MDDB(deck).head()
+    counts = import_ics(deck, str(ics), "research")
+    assert counts["updated"] == 0 and counts["skipped"] == 4
+    assert mddb.MDDB(deck).read(cid).yaml["notes"] == "hello"
+    assert mddb.MDDB(deck).head() == head
+
+
+def test_import_drops_stale_field(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    assert _count(deck, location="Room 1") == 1
+    ics.write_text(ics_sample.replace("LOCATION:Room 1\n", ""))
+    import_ics(deck, str(ics), "research")
+    assert _count(deck, location="Room 1") == 0
