@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdcal"
+version = "0.0.1"
+description = "An mddb-backed personal calendar"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Handley Research Group", email = "wh260@cam.ac.uk"}
+]
+keywords = ["calendar", "agents", "yaml", "markdown", "mddb"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Scheduling",
+]
+
+[project.urls]
+Homepage = "https://github.com/handley-lab/mdcal"
+Repository = "https://github.com/handley-lab/mdcal"
+Issues = "https://github.com/handley-lab/mdcal/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
