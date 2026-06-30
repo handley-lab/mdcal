@@ -25,7 +25,9 @@ primitives. Design choices must not paint that arc into a corner.
 - **alan-work** — a deployment repo (sibling to `alan-home`). Hosts the grid HTTP app and
   systemd units, served on `lovelace` now (movable to a work box later). *Consumes* mdcal.
 - **Decks** — the calendar data. Each deck is its **own private GitHub repo**, living in neither
-  app repo, cloned to a local unix-appropriate path (`~/.local/share/mddb/<deck>`). The grid app
+  app repo, cloned to a local path chosen by the *deployment* (the mdcal library takes the deck path
+  as an argument and implies no privileged location; Alan's deployment uses `/var/lib/mdcal/<deck>`,
+  FHS-correct application state mirroring `/var/lib/alan-loop`). The grid app
   overlays multiple decks and toggles each (work / home / polychord / subscribed) like Google's
   left-hand calendar list. Multiple calendars = separate decks unified in one view, *not* a field
   within one deck.
@@ -45,9 +47,11 @@ Everything else is **flat layer YAML** modelled on VEVENT defaults, indexed by m
 `entry_fields` and reached via raw SQL: `uid`, `dtstart`, `dtend`/`duration`, `dtstart_epoch`
 (UTC, for range queries), `tzid`, `all_day`, `rrule`, `status`, `transp`, `sequence`, `organizer`,
 `location`, `source`. Structured iCal data (attendees, organizer) keeps a flat companion field for
-search (e.g. `attendee_emails: [...]`) alongside full fidelity; **raw VEVENT text is preserved**
-(body or a YAML scalar block) so import bugs are fixable without re-exporting and outbound
-re-serialisation is faithful.
+search (e.g. `attendee_emails: [...]`) alongside full fidelity; a **content-complete VEVENT
+serialisation is preserved** (body fence, via `icalendar.to_ical()` — every property/param kept,
+but normalised, *not* byte-original) so import bugs are fixable without re-exporting. Byte-original
+preservation and full VTIMEZONE/semantic re-export fidelity are deferred (an importer that needs
+faithful outbound re-serialisation would split the source `.ics` into original VEVENT byte spans).
 
 **`uid` (iCal) is a layer field, distinct from mddb `id`** (a substrate-owned UUIDv4). Imported and
 subscribed events carry an upstream `uid` preserved for sync-by-uid. mddb does **not** enforce `uid`
@@ -73,7 +77,10 @@ under 20 ms. **Conclusion: read-time expansion is the model; no materialised ins
 linkable. A promoted card is just a `recurrence_id` override that lives in its own card: the
 resolver suppresses the master's generated instance for that slot and uses the card. Trivial
 overrides (moved / cancelled) stay inline on the master; substantive ones graduate. One resolver,
-two storage locations.
+two storage locations. **At import** (§Import) the choice is settled the simple way: *every* upstream
+`RECURRENCE-ID` component becomes its own card (a Google export's overrides are content-bearing by
+construction), so the importer never writes an inline `overrides` block — that block remains for
+locally-authored trivial overrides later.
 
 The grid query is therefore **SQL for candidates (non-recurring events overlapping the window +
 all cards with an `rrule`) then Python expand/resolve** — not pure SQL. Nested `overrides`/overlay
@@ -134,9 +141,14 @@ wait for the substrate (both reviewers converged on this independently):
 Source = the Google Calendar **`.ics` export** (verified faithful: carries `UID`, `ORGANIZER`,
 `STATUS`, `SEQUENCE`, `TRANSP`, `RRULE`, `RECURRENCE-ID`, `EXDATE` — all of which the Google API and
 its MCP drop; the API also returns expanded instances, not masters). The `.ics` *is* RFC 5545, so it
-maps ~1:1 onto VEVENT-shaped cards with least translation. Parsing/recurrence via `icalendar` +
-`python-dateutil` (mdcal deps, never mddb). Import is **idempotent** on `source_calendar + uid +
-recurrence_id`. Archival calendars (no events after 2024) import once and sit read-only.
+maps ~1:1 onto VEVENT-shaped cards with least translation. Import parses with `icalendar` (an mdcal
+dep, never mddb); `python-dateutil` is a **future** dep for read-time recurrence *expansion*, not used
+by the importer (which only re-serialises the `RRULE` string). Each upstream `RECURRENCE-ID` component
+is written as **its own card** keyed `uid+recurrence_id` (a Google export's overrides are
+content-bearing by construction); masters keep `rrule+exdate`; read-time resolution suppresses a
+master-generated instance when an exception card with that `uid+recurrence_id` exists. Import is
+**idempotent** on `source_calendar + uid + recurrence_id`. Archival calendars (no events after 2024)
+import once and sit read-only.
 
 A faithful export was taken 2026-06-30: **24 calendars, 12,507 events** (1,096 RRULE masters, 2,383
 RECURRENCE-ID exceptions, 2,685 EXDATEs, 12,630 UIDs; some calendars span 12–16 TZIDs). Held at
