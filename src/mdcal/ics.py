@@ -7,7 +7,12 @@ only through the public `mddb.MDDB` API and raw SQL over `db.conn`.
 """
 
 import argparse
+import datetime as _dt
+import hashlib
+import re
 from dataclasses import dataclass
+
+from slugify import slugify
 
 
 @dataclass
@@ -31,6 +36,76 @@ class RenderedCard:
     relpath: str
 
 
+def _ident(value):
+    """Return the canonical identity string for a recurrence id (`""` if absent).
+
+    The one serialiser shared by the relpath hash, the dedup-map key, and the
+    re-import lookup, so all three agree. Uses ``str(value)`` to match how mddb
+    indexes the ``recurrence_id`` YAML object into ``entry_fields.value_str``.
+
+    Args:
+        value: The ``recurrence_id`` ``date``/``datetime`` object, or ``None``.
+
+    Returns:
+        ``str(value)`` for a present recurrence id, else ``""``.
+    """
+    return "" if value is None else str(value)
+
+
+def _email(addr):
+    return re.sub(r"^mailto:", "", str(addr), flags=re.IGNORECASE)
+
+
+def _epoch(value):
+    if isinstance(value, _dt.datetime):
+        return int(value.timestamp())
+    midnight = _dt.datetime(value.year, value.month, value.day, tzinfo=_dt.timezone.utc)
+    return int(midnight.timestamp())
+
+
+def _check_aware(value, uid):
+    if isinstance(value, _dt.datetime) and value.tzinfo is None:
+        raise ValueError(
+            f"floating (naive) datetime unsupported: uid={uid} value={value!r}"
+        )
+
+
+def _point(prop, uid):
+    value = prop.dt
+    _check_aware(value, uid)
+    tzid = prop.params.get("TZID") if isinstance(value, _dt.datetime) else None
+    if tzid is None and isinstance(value, _dt.datetime):
+        tzid = str(value.tzinfo)
+    return (
+        value,
+        _epoch(value),
+        isinstance(value, _dt.date) and not isinstance(value, _dt.datetime),
+        tzid,
+    )
+
+
+def _exdates(vevent, uid):
+    raw = vevent.get("EXDATE")
+    if raw is None:
+        return []
+    groups = raw if isinstance(raw, list) else [raw]
+    out = []
+    for group in groups:
+        for item in group.dts:
+            _check_aware(item.dt, uid)
+            out.append(item.dt)
+    return sorted(out)
+
+
+def _when_clause(dtstart, dtend, all_day, tzid):
+    if all_day:
+        last = dtend - _dt.timedelta(days=1)
+        if last <= dtstart:
+            return f"{dtstart:%Y-%m-%d} (all-day)"
+        return f"{dtstart:%Y-%m-%d}–{last:%Y-%m-%d} (all-day)"
+    return f"{dtstart:%Y-%m-%d %H:%M}–{dtend:%H:%M} {tzid}"
+
+
 def vevent_to_card(vevent, source):
     """Render one iCalendar VEVENT into a `RenderedCard`.
 
@@ -43,9 +118,104 @@ def vevent_to_card(vevent, source):
         The `RenderedCard` for the event.
 
     Raises:
-        NotImplementedError: Until the Phase 1 mapping engine lands.
+        ValueError: A floating (naive) datetime is encountered (crash-on-drift).
     """
-    raise NotImplementedError
+    uid = str(vevent["UID"])
+    title = str(vevent["SUMMARY"]) if vevent.get("SUMMARY") else "(untitled)"
+
+    dtstart, dtstart_epoch, all_day, tzid = _point(vevent["DTSTART"], uid)
+    if vevent.get("DTEND"):
+        dtend, dtend_epoch, _, _ = _point(vevent["DTEND"], uid)
+    elif all_day:
+        dtend = dtstart + _dt.timedelta(days=1)
+        dtend_epoch = _epoch(dtend)
+    else:
+        dtend, dtend_epoch = dtstart, dtstart_epoch
+
+    recurrence_id = None
+    if vevent.get("RECURRENCE-ID"):
+        recurrence_id = vevent["RECURRENCE-ID"].dt
+        _check_aware(recurrence_id, uid)
+
+    status = str(vevent["STATUS"]) if vevent.get("STATUS") else "CONFIRMED"
+    yaml = {
+        "source": source,
+        "uid": uid,
+        "recurrence_id": recurrence_id,
+        "recurrence_id_epoch": _epoch(recurrence_id)
+        if recurrence_id is not None
+        else None,
+        "dtstart": dtstart,
+        "dtstart_epoch": dtstart_epoch,
+        "dtend": dtend,
+        "dtend_epoch": dtend_epoch,
+        "all_day": all_day,
+        "tzid": tzid,
+        "status": status,
+        "transp": str(vevent["TRANSP"]) if vevent.get("TRANSP") else None,
+        "sequence": int(vevent["SEQUENCE"])
+        if vevent.get("SEQUENCE") is not None
+        else None,
+        "rrule": vevent["RRULE"].to_ical().decode() if vevent.get("RRULE") else None,
+        "exdate": _exdates(vevent, uid) or None,
+        "location": str(vevent["LOCATION"]) if vevent.get("LOCATION") else None,
+        "organizer": _email(vevent["ORGANIZER"]) if vevent.get("ORGANIZER") else None,
+        "attendee_emails": _attendees(vevent) or None,
+        "conference_url": str(vevent["X-GOOGLE-CONFERENCE"])
+        if vevent.get("X-GOOGLE-CONFERENCE")
+        else None,
+        "created": vevent["CREATED"].dt if vevent.get("CREATED") else None,
+        "last_modified": vevent["LAST-MODIFIED"].dt
+        if vevent.get("LAST-MODIFIED")
+        else None,
+    }
+    yaml = {k: v for k, v in yaml.items() if v is not None}
+
+    prefix = "[cancelled] " if status == "CANCELLED" else ""
+    flag = (
+        " · recurring"
+        if "rrule" in yaml
+        else " · override"
+        if recurrence_id is not None
+        else ""
+    )
+    summary = f"{prefix}{title} · {_when_clause(dtstart, dtend, all_day, tzid)}{flag}"
+
+    tags = _categories(vevent)
+    description = str(vevent["DESCRIPTION"]) if vevent.get("DESCRIPTION") else ""
+    ics_block = vevent.to_ical().decode().strip()
+    body = (f"{description}\n\n" if description else "") + f"```ics\n{ics_block}\n```\n"
+
+    return RenderedCard(
+        title=title,
+        summary=summary,
+        body=body,
+        tags=tags,
+        yaml=yaml,
+        relpath=_relpath(source, uid, recurrence_id, title, dtstart),
+    )
+
+
+def _attendees(vevent):
+    raw = vevent.get("ATTENDEE")
+    if raw is None:
+        return []
+    return [_email(a) for a in (raw if isinstance(raw, list) else [raw])]
+
+
+def _categories(vevent):
+    raw = vevent.get("CATEGORIES")
+    if raw is None:
+        return []
+    groups = raw if isinstance(raw, list) else [raw]
+    return [str(c) for group in groups for c in group.cats]
+
+
+def _relpath(source, uid, recurrence_id, title, dtstart):
+    ident = f"{source}\x00{uid}\x00{_ident(recurrence_id)}"
+    digest = hashlib.sha1(ident.encode()).hexdigest()[:12]
+    stub = slugify(title)[:40] or "untitled"
+    return f"{dtstart.year}/{stub}-{digest}.md"
 
 
 def main():
