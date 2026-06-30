@@ -14,7 +14,7 @@ authors = [
     {name = "Handley Research Group", email = "wh260@cam.ac.uk"}
 ]
 keywords = ["calendar", "agents", "yaml", "markdown", "mddb"]
-dependencies = ["mddb", "icalendar>=6", "python-dateutil"]
+dependencies = ["mddb", "icalendar>=6", "python-dateutil", "PyYAML>=6.0"]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",
