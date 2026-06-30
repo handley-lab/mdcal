@@ -11,7 +11,10 @@ import datetime as _dt
 import hashlib
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
+import icalendar
+import yaml
 from slugify import slugify
 
 
@@ -218,11 +221,46 @@ def _relpath(source, uid, recurrence_id, title, dtstart):
     return f"{dtstart.year}/{stub}-{digest}.md"
 
 
-def main():
+def _vevents(ics_path, uid, limit):
+    cal = icalendar.Calendar.from_ical(Path(ics_path).read_text())
+    events = list(cal.walk("VEVENT"))
+    if uid:
+        events = [v for v in events if str(v["UID"]) == uid]
+    if limit is not None:
+        events = events[:limit]
+    return events
+
+
+def render_text(card):
+    """Render a `RenderedCard` as the `.md` text mddb would write to disk.
+
+    The on-disk frontmatter order mirrors mddb's canonical ordering (``id``,
+    ``title``, ``summary``, ``tags``, then the layer YAML), so a dry-run preview
+    shows the exact card shape. The ``id`` is a placeholder — mddb assigns the
+    real UUID at write time.
+
+    Args:
+        card: The `RenderedCard` to render.
+
+    Returns:
+        The full `.md` text (frontmatter + body), starting with ``---``.
+    """
+    front = {"id": "<assigned-at-write>", "title": card.title, "summary": card.summary}
+    if card.tags:
+        front["tags"] = card.tags
+    front.update(card.yaml)
+    dumped = yaml.safe_dump(front, sort_keys=False, allow_unicode=True)
+    return f"---\n{dumped}---\n{card.body}"
+
+
+def main(argv=None):
     """Run the `mdcal-import` console script.
 
-    Parses the source `.ics`, then either renders cards to stdout (``--dry-run``)
-    or imports them into the deck at ``--deck`` idempotently.
+    Parses the source `.ics`, then renders cards to stdout (``--dry-run``) or
+    imports them into the deck at ``--deck`` idempotently.
+
+    Args:
+        argv: Argument list for testing; defaults to ``sys.argv[1:]``.
     """
     parser = argparse.ArgumentParser(prog="mdcal-import")
     parser.add_argument("--source", required=True)
@@ -231,8 +269,16 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--uid")
-    parser.parse_args()
-    raise NotImplementedError
+    args = parser.parse_args(argv)
+
+    events = _vevents(args.ics, args.uid, args.limit)
+    if args.dry_run:
+        for vevent in events:
+            card = vevent_to_card(vevent, args.source)
+            print(f"# ===== {card.relpath} =====")
+            print(render_text(card))
+        return
+    raise NotImplementedError("deck writer lands in Phase 3")
 
 
 if __name__ == "__main__":

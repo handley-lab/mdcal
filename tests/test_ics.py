@@ -5,7 +5,7 @@ import icalendar
 import pytest
 import yaml
 
-from mdcal.ics import RenderedCard, _ident, vevent_to_card
+from mdcal.ics import RenderedCard, _ident, main, render_text, vevent_to_card
 
 
 def _vevents(ics_text):
@@ -117,3 +117,51 @@ def test_ident_roundtrip_str_stable():
     reloaded = yaml.safe_load(yaml.safe_dump({"r": moment}))["r"]
     assert _ident(moment) == _ident(reloaded)
     assert _ident(None) == ""
+
+
+def test_render_text_frontmatter_then_body(ics_sample):
+    text = render_text(vevent_to_card(_vevents(ics_sample)[0], "test"))
+    assert text.startswith("---\n")
+    front = text.split("---\n")[1]
+    keys = list(yaml.safe_load(front))
+    assert keys[:4] == ["id", "title", "summary", "source"]
+    parsed = yaml.safe_load(front)
+    assert parsed["title"] == "Plain meeting"
+    assert parsed["uid"] == "plain-1@example.com"
+    assert "```ics" in text
+
+
+def test_main_dry_run_writes_nothing(ics_sample, tmp_path, capsys):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = tmp_path / "deck"
+    main(["--source", "research", "--ics", str(ics), "--deck", str(deck), "--dry-run"])
+    out = capsys.readouterr().out
+    for title in ["Plain meeting", "Weekly standup", "Conference trip"]:
+        assert title in out
+    assert not deck.exists()
+
+
+def test_main_dry_run_uid_filters(ics_sample, tmp_path, capsys):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    main(
+        [
+            "--source",
+            "research",
+            "--ics",
+            str(ics),
+            "--uid",
+            "plain-1@example.com",
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "Plain meeting" in out and "Conference trip" not in out
+
+
+def test_main_write_path_not_yet_implemented(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    with pytest.raises(NotImplementedError):
+        main(["--source", "research", "--ics", str(ics), "--deck", str(tmp_path / "d")])
