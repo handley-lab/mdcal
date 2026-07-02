@@ -19,7 +19,7 @@ import mddb
 import yaml
 from slugify import slugify
 
-_IMPORTER_KEYS = (
+EVENT_KEYS = (
     "source",
     "uid",
     "recurrence_id",
@@ -42,6 +42,13 @@ _IMPORTER_KEYS = (
     "created",
     "last_modified",
 )
+"""Flat YAML keys owned by `vevent_to_card` on every event card.
+
+The shared write contract: any writer that re-renders a card (a re-import, a
+web edit) strips exactly these keys from the existing YAML before applying a
+fresh render, so fields the source dropped don't linger while non-owned local
+keys survive.
+"""
 
 
 @dataclass
@@ -296,7 +303,7 @@ def _existing_map(db, source):
 
 
 def _unchanged(card, existing):
-    existing_importer = {k: v for k, v in existing.yaml.items() if k in _IMPORTER_KEYS}
+    existing_importer = {k: v for k, v in existing.yaml.items() if k in EVENT_KEYS}
     return (
         card.title == existing.title
         and card.summary == existing.summary
@@ -366,7 +373,7 @@ def import_ics(deck, ics_path, source, uid=None, limit=None):
                     kept = {
                         k: v
                         for k, v in existing_card.yaml.items()
-                        if k not in _IMPORTER_KEYS
+                        if k not in EVENT_KEYS
                     }
                     kept["title"] = card.title
                     kept.update(card.yaml)
