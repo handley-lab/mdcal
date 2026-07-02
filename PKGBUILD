@@ -18,7 +18,6 @@ package() {
   install -Dm644 src/mdcal/ics.py      "$pkgdir/$purelib/mdcal/ics.py"
   install -Dm644 src/mdcal/window.py   "$pkgdir/$purelib/mdcal/window.py"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-  install -Dm644 tmpfiles.d/mdcal.conf "$pkgdir/usr/lib/tmpfiles.d/mdcal.conf"
   install -dm755 "$pkgdir/usr/bin"
   printf '#!/usr/bin/env python\nfrom mdcal.ics import main\nmain()\n' > "$pkgdir/usr/bin/mdcal-import"
   chmod 755 "$pkgdir/usr/bin/mdcal-import"

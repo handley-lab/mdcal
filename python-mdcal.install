@@ -1,16 +1,12 @@
 post_install() {
-  systemd-tmpfiles --create /usr/lib/tmpfiles.d/mdcal.conf
   cat <<'EOF'
-mdcal: deck storage provisioned at /var/lib/mdcal (owned by will).
+mdcal: library installed. Deck storage (e.g. /var/lib/mdcal) is provisioned by
+the deployment package that runs a deck-writing service, not by this library.
 
 Import a calendar into a deck with:
-  mdcal-import --source <name> --ics <path.ics> --deck /var/lib/mdcal/<name>
+  mdcal-import --source <name> --ics <path.ics> --deck <deck-path>
 
 Preview the card shape first without writing:
   mdcal-import --source <name> --ics <path.ics> --dry-run --limit 5
 EOF
-}
-
-post_upgrade() {
-  post_install
 }
