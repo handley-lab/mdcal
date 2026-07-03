@@ -78,7 +78,8 @@ SQL joins that SQLite could only nested-loop (~640 ms combined; no `(entry_rowid
 dateutil rrule expansion itself is ~17 ms for all 442 masters. It reads cards from the
 `entries.yaml_text` cache (not `db.read`, whose blob-scan is O(deck) on a flat deck). At ~85 ms no
 request-level caching is needed; if it ever is, it lives in the **grid layer**, which owns the
-navigation loop — not in this primitive.
+navigation loop — not in this primitive. The grid's two-deck union (research + subscribed, 4,810
+cards total) measures ~117 ms/month-window end-to-end over TLS.
 
 **Promotion.** An occurrence that accrues real content (notes, a write-up, its own attendees) is
 **promoted to its own card** keyed `uid + recurrence_id`, so it is independently FTS-findable and
