@@ -151,7 +151,10 @@ def vevent_to_card(vevent, source):
             component of the import identity ``source + uid + recurrence_id``.
 
     Returns:
-        The `RenderedCard` for the event.
+        The `RenderedCard` for the event. The body's fenced VEVENT keeps every
+        event-content property but excludes ``DTSTAMP``: Google feeds stamp it
+        with the serve time, so keeping it would make every re-fetch of an
+        unchanged feed rewrite every card.
 
     Raises:
         ValueError: A floating (naive) datetime is encountered (crash-on-drift).
@@ -219,7 +222,11 @@ def vevent_to_card(vevent, source):
 
     tags = _categories(vevent)
     description = str(vevent["DESCRIPTION"]) if vevent.get("DESCRIPTION") else ""
-    ics_block = vevent.to_ical().decode().replace("\r\n", "\n").strip()
+    ics_block = "\n".join(
+        line
+        for line in vevent.to_ical().decode().replace("\r\n", "\n").strip().split("\n")
+        if not line.startswith("DTSTAMP")
+    )
     body = (f"{description}\n\n" if description else "") + f"```ics\n{ics_block}\n```\n"
 
     return RenderedCard(
@@ -313,7 +320,7 @@ def _unchanged(card, existing):
     )
 
 
-def import_ics(deck, ics_path, source, uid=None, limit=None):
+def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
     """Idempotently import an `.ics` calendar into the mddb deck at `deck`.
 
     Opens (or initialises) the deck, renders one card per VEVENT, and within a
@@ -327,10 +334,23 @@ def import_ics(deck, ics_path, source, uid=None, limit=None):
         source: The calendar/source label written to each card's ``source`` field.
         uid: Optional single iCal UID to restrict the import to.
         limit: Optional cap on the number of VEVENTs imported.
+        prune: Delete existing cards of this ``source`` absent from the file's
+            identity set — for polling a feed that serves the calendar's full
+            span, where an absent event means an upstream deletion. Cards of
+            other sources (``local``, …) are never touched; git history is the
+            tombstone. Nothing to prune opens no editor block.
 
     Returns:
-        A ``{"created": int, "updated": int, "skipped": int}`` count summary.
+        A ``{"created": int, "updated": int, "skipped": int, "pruned": int}``
+        count summary.
+
+    Raises:
+        ValueError: ``prune`` combined with ``uid`` or ``limit`` — a partial
+            import's identity set is incomplete by construction, so pruning
+            against it would delete every unselected card of the source.
     """
+    if prune and (uid is not None or limit is not None):
+        raise ValueError("prune requires a full feed; cannot combine with uid/limit")
     db = _open_or_init(deck)
     existing = _existing_map(db, source)
     by_year = collections.defaultdict(list)
@@ -338,7 +358,7 @@ def import_ics(deck, ics_path, source, uid=None, limit=None):
         card = vevent_to_card(vevent, source)
         by_year[card.yaml["dtstart"].year].append(card)
 
-    counts = {"created": 0, "updated": 0, "skipped": 0}
+    counts = {"created": 0, "updated": 0, "skipped": 0, "pruned": 0}
     for year in sorted(by_year):
         actions = []
         year_skipped = 0
@@ -386,6 +406,18 @@ def import_ics(deck, ics_path, source, uid=None, limit=None):
         counts["created"] += year_created
         counts["updated"] += year_updated
         print(f"  {year}: +{year_created} ~{year_updated} ={year_skipped}")
+    if prune:
+        feed_idents = {
+            (card.yaml["uid"], _ident(card.yaml.get("recurrence_id")))
+            for cards in by_year.values()
+            for card in cards
+        }
+        stale = [cid for ident, cid in existing.items() if ident not in feed_idents]
+        if stale:
+            with db.editor(rationale=f"prune {source}: {len(stale)} removed") as editor:
+                for cid in stale:
+                    editor.delete(cid)
+        counts["pruned"] = len(stale)
     return counts
 
 
@@ -405,6 +437,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--uid")
+    parser.add_argument("--prune", action="store_true")
     args = parser.parse_args(argv)
 
     if args.dry_run:
@@ -415,9 +448,12 @@ def main(argv=None):
         return
     if not args.deck:
         parser.error("--deck is required unless --dry-run")
-    counts = import_ics(args.deck, args.ics, args.source, args.uid, args.limit)
+    counts = import_ics(
+        args.deck, args.ics, args.source, args.uid, args.limit, args.prune
+    )
     print(
-        f"created={counts['created']} updated={counts['updated']} skipped={counts['skipped']}"
+        f"created={counts['created']} updated={counts['updated']} "
+        f"skipped={counts['skipped']} pruned={counts['pruned']}"
     )
 
 

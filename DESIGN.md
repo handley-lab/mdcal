@@ -48,8 +48,10 @@ Everything else is **flat layer YAML** modelled on VEVENT defaults, indexed by m
 (UTC, for range queries), `tzid`, `all_day`, `rrule`, `status`, `transp`, `sequence`, `organizer`,
 `location`, `source`. Structured iCal data (attendees, organizer) keeps a flat companion field for
 search (e.g. `attendee_emails: [...]`) alongside full fidelity; a **content-complete VEVENT
-serialisation is preserved** (body fence, via `icalendar.to_ical()` — every property/param kept,
-but normalised, *not* byte-original) so import bugs are fixable without re-exporting. Byte-original
+serialisation is preserved** (body fence, via `icalendar.to_ical()` — every *event-content*
+property/param kept, normalised, *not* byte-original; the sole exclusion is `DTSTAMP`, which
+Google feeds stamp with the serve time — volatile serialisation metadata, see §Subscribed
+external feeds) so import bugs are fixable without re-exporting. Byte-original
 preservation and full VTIMEZONE/semantic re-export fidelity are deferred (an importer that needs
 faithful outbound re-serialisation would split the source `.ics` into original VEVENT byte spans).
 
@@ -69,11 +71,15 @@ carries `rrule` + `exdate` (a flat date list, top-level/indexed) + an `overrides
 each `recurrence_id`, suppress the generated instance (its exception card renders concretely at its own
 time). Implemented in `mdcal/window.py` (`events_in_window`). **Conclusion: read-time expansion is the
 model; no materialised instance cache.** Performance (measured on the live 442-master Research deck):
-the *stateless* primitive runs **~0.8–1.4 s/window** — dominated by parsing the ~442 rrules; it reads
-cards from the `entries.yaml_text` cache (not `db.read`, whose blob-scan is O(deck) on a flat deck). A
-bare rrule-expansion micro-benchmark is ~tens of ms, but parse+load is the real cost. Request-level
-caching (parsed masters keyed by deck HEAD) and an indexed `until_epoch` prefilter to skip expired
-masters live in the **grid layer**, which owns the navigation loop — not in this primitive.
+the *stateless* primitive runs **~85 ms/month-window** after two targeted fixes — libyaml's
+`CSafeLoader` for frontmatter parsing (identical SafeLoader semantics, ~9× faster than pure-Python
+PyYAML, which alone cost ~750 ms/window) and Python-side joins replacing two `entry_fields` key-range
+SQL joins that SQLite could only nested-loop (~640 ms combined; no `(entry_rowid, key)` index exists).
+dateutil rrule expansion itself is ~17 ms for all 442 masters. It reads cards from the
+`entries.yaml_text` cache (not `db.read`, whose blob-scan is O(deck) on a flat deck). At ~85 ms no
+request-level caching is needed; if it ever is, it lives in the **grid layer**, which owns the
+navigation loop — not in this primitive. The grid's two-deck union (research + subscribed, 4,810
+cards total) measures ~117 ms/month-window end-to-end over TLS.
 
 **Promotion.** An occurrence that accrues real content (notes, a write-up, its own attendees) is
 **promoted to its own card** keyed `uid + recurrence_id`, so it is independently FTS-findable and
@@ -91,23 +97,39 @@ data is not itself SQL/FTS-queryable (mddb indexes only top-level scalars and li
 stay queryable, override *details* are seen only after resolution. Promotion is the escape hatch
 when an occurrence must be findable.
 
-## Subscribed external feeds (e.g. GAMBIT) — same base + overlay pattern
+## Subscribed external feeds (e.g. GAMBIT) — read-only subset now, base + overlay later
 
-A feed is a read-only `.ics` URL the owner does not control. A small mdcal **fetcher** periodically
-pulls it and writes/updates cards tagged `source=<feed>`, keyed by `uid`. Each card splits into:
+A feed is a `.ics` URL polled periodically into a deck. **The implemented subset (feed-sync
+slice) is read-only ingest**: the fetcher is `curl` + the `mdcal-import` CLI on a systemd timer
+(composition, not a Python fetcher module — the Python lives in `import_ics` itself), writing
+ordinary flat importer cards keyed `source + uid + recurrence_id`, with **prune-on-absent**
+(`mdcal-import --prune`): a card of that source absent from the fetched feed's identity set is
+deleted, git history serving as the tombstone. Prune is only sound against a feed serving the
+calendar's **full historical span** — verified per feed before it ships (both Google URL
+flavours checked live: spans back to the oldest events, counts matching the deck). The layer
+invariant makes prune lossless: web/local edits are forbidden on feed-sourced cards
+(`source != local` is read-only), so pruned cards carry nothing local. `--prune` refuses
+`--uid`/`--limit` — a partial import's identity set would mass-delete the unselected remainder.
 
-- a **base** section — the fetcher overwrites this verbatim each pull (upstream facts);
-- an **adjustments** overlay — the fetcher *never* touches it (local edits).
+Google's ICS endpoints send **no ETag / no Last-Modified** (`cache-control: no-store`), so
+conditional GET is impossible — and feeds are never even byte-stable: measured across paired
+fetches, Google reorders VEVENTs per response and stamps **every event's `DTSTAMP` with the
+serve time** (all other properties value-stable). So the fetcher keeps no state and always
+imports; idempotency is the comparator. To keep serve-time DTSTAMPs from defeating
+`_unchanged`, the feed-sync slice changes `vevent_to_card` to exclude the `DTSTAMP` line from
+the fenced VEVENT — with these semantics it is serialisation metadata, not event content (the
+flat yaml's `created`/`last_modified` come from the stable CREATED/LAST-MODIFIED). Hourly
+polling ships only after a captured re-fetch pair imports as create-then-no-op. Feed URLs come in two
+flavours: *public* (`…/ical/<id>/public/basic.ics`) and per-user *secret*
+(`…/ical/<id>/private-<token>/basic.ics`) for private calendars — the secret token is a
+committed credential of the private deployment repo.
 
-Render = base with adjustments applied. Local hide = `adjustments: {hidden: true}`; local rename =
-`adjustments: {title: ...}`. Kept events track upstream changes (the fetcher refreshes base); local
-overlay always survives. This is OpenAI's recommended fix for "the fetcher is just another writer
-that clobbers local edits" — and the **same** base+overlay shape as recurrence overrides.
-
-**Tombstones, not deletes.** An event removed upstream, or a single occurrence the owner drops, is
-marked (`adjustments: {hidden}` / a tombstone) so the next pull does not resurrect it. SQL queries
-filter tombstones. Honour `sequence`: never apply an older upstream component over a newer one.
-`STATUS:CANCELLED` stays as a (hidden) card, not a delete — for faithful history and interop.
+**Deferred to the overlay slice** (needed once feed events take local annotations): the
+base+overlay split — a **base** section the fetcher overwrites each pull, an **adjustments**
+overlay it never touches (local hide = `adjustments: {hidden: true}`, local rename, …), render =
+base with adjustments applied, and marked tombstones instead of deletes so a local hide survives
+the next pull. Honour `sequence` (never apply an older upstream component over a newer one) when
+overlays land. `STATUS:CANCELLED` already stays as a card (the resolver hides it), not a delete.
 
 ## Sync — three distinct pipes (do not conflate)
 
@@ -120,8 +142,9 @@ filter tombstones. Honour `sequence`: never apply an older upstream component ov
    offline devices → frontmatter conflict → invalid YAML → surfaced in the grid for resolution via
    `conflict_rationales()`. The conflict scanner must work at git/filesystem level, because invalid
    YAML makes `db.read`/rebuild raise *before* the grid can query.
-2. **Subscribed feed = one-way ICS pull** (web → deck, read-only upstream + local overlay). Not
-   git, not the merge driver — pure Python in the fetcher.
+2. **Subscribed feed = one-way ICS pull** (web → deck; read-only ingest now, local overlay
+   later — see §Subscribed external feeds). Not git, not the merge driver — `curl` + the
+   `mdcal-import` CLI on a timer; the Python is `import_ics` itself.
 3. **Invites to/from others = iMIP email** (an invite is an `.ics`-bearing email; RSVP returns by
    email). The interop boundary; unrelated to (1) and (2). No retained Google API credential.
 

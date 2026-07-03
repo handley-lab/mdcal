@@ -190,7 +190,7 @@ def test_import_creates(ics_sample, tmp_path):
     ics.write_text(ics_sample)
     deck = str(tmp_path / "deck")
     counts = import_ics(deck, str(ics), "research")
-    assert counts == {"created": 4, "updated": 0, "skipped": 0}
+    assert counts == {"created": 4, "updated": 0, "skipped": 0, "pruned": 0}
     assert _count(deck) == 4
     assert _count(deck, rrule="FREQ=WEEKLY;COUNT=6;BYDAY=MO") == 1
     assert _count(deck, recurrence_id="2024-01-15 13:00:00+00:00") == 1
@@ -203,7 +203,7 @@ def test_import_idempotent_no_new_commit(ics_sample, tmp_path):
     import_ics(deck, str(ics), "research")
     head_before = mddb.MDDB(deck).head()
     counts = import_ics(deck, str(ics), "research")
-    assert counts == {"created": 0, "updated": 0, "skipped": 4}
+    assert counts == {"created": 0, "updated": 0, "skipped": 4, "pruned": 0}
     assert _count(deck) == 4
     assert mddb.MDDB(deck).head() == head_before
 
@@ -258,3 +258,91 @@ def test_import_drops_stale_field(ics_sample, tmp_path):
     ics.write_text(ics_sample.replace("LOCATION:Room 1\n", ""))
     import_ics(deck, str(ics), "research")
     assert _count(deck, location="Room 1") == 0
+
+
+def test_fence_excludes_dtstamp(ics_sample):
+    card = vevent_to_card(_vevents(ics_sample)[0], "test")
+    assert "DTSTAMP" not in card.body
+    assert "UID:plain-1@example.com" in card.body
+
+
+def test_reimport_with_churned_dtstamp_is_noop(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    head = mddb.MDDB(deck).head()
+    ics.write_text(
+        ics_sample.replace("DTSTAMP:20260101T120000Z", "DTSTAMP:20260703T090909Z")
+    )
+    counts = import_ics(deck, str(ics), "research")
+    assert counts == {"created": 0, "updated": 0, "skipped": 4, "pruned": 0}
+    assert mddb.MDDB(deck).head() == head
+
+
+def test_prune_removes_absent(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    plain = ics_sample[
+        ics_sample.index("BEGIN:VEVENT") : ics_sample.index("END:VEVENT")
+        + len("END:VEVENT\n")
+    ]
+    ics.write_text(ics_sample.replace(plain, ""))
+    counts = import_ics(deck, str(ics), "research", prune=True)
+    assert counts["pruned"] == 1
+    assert _count(deck) == 3
+    assert _count(deck, uid="plain-1@example.com") == 0
+
+
+def test_prune_spares_local_and_other_sources(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    import_ics(deck, str(ics), "other")
+    db = mddb.MDDB(deck)
+    with db.editor(rationale="seed a local event") as e:
+        e.create(
+            title="Local",
+            summary="local event",
+            yaml={
+                "source": "local",
+                "uid": "l@x",
+                "all_day": False,
+                "status": "CONFIRMED",
+            },
+            relpath="2024-01-01-local-abc.md",
+        )
+    plain = ics_sample[
+        ics_sample.index("BEGIN:VEVENT") : ics_sample.index("END:VEVENT")
+        + len("END:VEVENT\n")
+    ]
+    ics.write_text(ics_sample.replace(plain, ""))
+    counts = import_ics(deck, str(ics), "research", prune=True)
+    assert counts["pruned"] == 1
+    assert _count(deck, source="research") == 3
+    assert _count(deck, source="other") == 4
+    assert _count(deck, source="local") == 1
+
+
+def test_prune_noop_commits_nothing(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    head = mddb.MDDB(deck).head()
+    counts = import_ics(deck, str(ics), "research", prune=True)
+    assert counts == {"created": 0, "updated": 0, "skipped": 4, "pruned": 0}
+    assert mddb.MDDB(deck).head() == head
+
+
+def test_prune_rejects_partial_imports(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    with pytest.raises(ValueError, match="prune"):
+        import_ics(deck, str(ics), "research", uid="plain-1@example.com", prune=True)
+    with pytest.raises(ValueError, match="prune"):
+        import_ics(deck, str(ics), "research", limit=1, prune=True)
