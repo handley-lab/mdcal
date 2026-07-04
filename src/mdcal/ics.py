@@ -50,6 +50,15 @@ fresh render, so fields the source dropped don't linger while non-owned local
 keys survive.
 """
 
+GRACE = _dt.timedelta(hours=1)
+"""Prune exemption window for cards with a ``dispatched`` guard.
+
+A write-through create reaches Google immediately but its feed takes ~2
+minutes (measured) to serve it; pruning the card in that window would eat a
+user-authored event. One hour is a ~30x margin without pinning a genuinely
+upstream-deleted card forever.
+"""
+
 
 @dataclass
 class RenderedCard:
@@ -309,6 +318,30 @@ def _existing_map(db, source):
     return {(uid, _ident(rid)): cid for cid, uid, rid in rows}
 
 
+def _guarded(card, existing):
+    """True when a dispatched write-through outruns the feed for this card.
+
+    A card carrying a ``dispatched`` watermark (set by a Google write-through)
+    must not be updated from feed content older than that write — the feed
+    lags the API and would revert it. Once the feed catches up
+    (``last_modified >= dispatched``) the guard is inert and the normal
+    update converges the card to the feed's canonical serialisation.
+
+    Raises:
+        ValueError: The guarded card's feed counterpart lacks
+            ``LAST-MODIFIED`` — the watermark premise is broken
+            (crash-on-drift, never a silent weaker guard).
+    """
+    dispatched = existing.yaml.get("dispatched")
+    if dispatched is None:
+        return False
+    if "last_modified" not in card.yaml:
+        raise ValueError(
+            f"feed VEVENT lacks LAST-MODIFIED for guarded uid={card.yaml['uid']}"
+        )
+    return card.yaml["last_modified"] < dispatched
+
+
 def _unchanged(card, existing):
     existing_importer = {k: v for k, v in existing.yaml.items() if k in EVENT_KEYS}
     return (
@@ -368,7 +401,9 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
             )
             if cid is None:
                 actions.append((card, None))
-            elif _unchanged(card, db.read(cid)):
+                continue
+            existing_card = db.read(cid)
+            if _guarded(card, existing_card) or _unchanged(card, existing_card):
                 year_skipped += 1
             else:
                 actions.append((card, cid))
@@ -412,7 +447,16 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
             for cards in by_year.values()
             for card in cards
         }
-        stale = [cid for ident, cid in existing.items() if ident not in feed_idents]
+        now = _dt.datetime.now(_dt.timezone.utc)
+        stale = [
+            cid
+            for ident, cid in existing.items()
+            if ident not in feed_idents
+            and not (
+                (dispatched := db.read(cid).yaml.get("dispatched")) is not None
+                and now - dispatched < GRACE
+            )
+        ]
         if stale:
             with db.editor(rationale=f"prune {source}: {len(stale)} removed") as editor:
                 for cid in stale:

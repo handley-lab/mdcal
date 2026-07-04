@@ -346,3 +346,149 @@ def test_prune_rejects_partial_imports(ics_sample, tmp_path):
         import_ics(deck, str(ics), "research", uid="plain-1@example.com", prune=True)
     with pytest.raises(ValueError, match="prune"):
         import_ics(deck, str(ics), "research", limit=1, prune=True)
+
+
+def _dispatch(deck, uid, dispatched):
+    db = mddb.MDDB(deck)
+    cid = db.conn.execute(
+        "SELECT e.id FROM entries e JOIN entry_fields f ON f.entry_rowid=e.rowid "
+        "WHERE f.key='uid' AND f.value_str=?",
+        (uid,),
+    ).fetchone()[0]
+    with db.editor(rationale="mark dispatched") as e:
+        card = e.read(cid)
+        card.yaml["dispatched"] = dispatched
+        e.update(card, summary=card.summary)
+    return cid
+
+
+def test_guard_skips_stale_feed_content(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    ics_with_lm = ics_sample.replace(
+        "SUMMARY:Plain meeting", "LAST-MODIFIED:20260101T120000Z\nSUMMARY:Plain meeting"
+    )
+    ics.write_text(ics_with_lm)
+    import_ics(deck, str(ics), "research")
+    _dispatch(
+        deck,
+        "plain-1@example.com",
+        dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc),
+    )
+    head = mddb.MDDB(deck).head()
+    ics.write_text(ics_with_lm.replace("Plain meeting", "Plain meeting REVERTED"))
+    counts = import_ics(deck, str(ics), "research")
+    assert counts["updated"] == 0 and counts["skipped"] == 4
+    assert mddb.MDDB(deck).head() == head
+
+
+def test_guard_inert_once_feed_catches_up(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(
+        ics_sample.replace(
+            "SUMMARY:Plain meeting",
+            "LAST-MODIFIED:20260101T120000Z\nSUMMARY:Plain meeting",
+        )
+    )
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    cid = _dispatch(
+        deck,
+        "plain-1@example.com",
+        dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc),
+    )
+    ics.write_text(
+        ics_sample.replace(
+            "SUMMARY:Plain meeting",
+            "LAST-MODIFIED:20260701T120000Z\nSUMMARY:Plain meeting CONVERGED",
+        )
+    )
+    counts = import_ics(deck, str(ics), "research")
+    assert counts["updated"] == 1
+    card = mddb.MDDB(deck).read(cid)
+    assert card.title == "Plain meeting CONVERGED"
+    assert card.yaml["dispatched"] == dt.datetime(
+        2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc
+    )
+
+
+def test_guarded_card_without_feed_last_modified_raises(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    _dispatch(
+        deck,
+        "plain-1@example.com",
+        dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc),
+    )
+    ics.write_text(ics_sample.replace("Plain meeting", "Plain meeting CHANGED"))
+    with pytest.raises(ValueError, match="LAST-MODIFIED"):
+        import_ics(deck, str(ics), "research")
+
+
+def test_prune_exempts_recent_dispatch(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    _dispatch(deck, "plain-1@example.com", dt.datetime.now(dt.timezone.utc))
+    plain = ics_sample[
+        ics_sample.index("BEGIN:VEVENT") : ics_sample.index("END:VEVENT")
+        + len("END:VEVENT\n")
+    ]
+    ics.write_text(ics_sample.replace(plain, ""))
+    counts = import_ics(deck, str(ics), "research", prune=True)
+    assert counts["pruned"] == 0
+    assert _count(deck, uid="plain-1@example.com") == 1
+
+
+def test_prune_collects_after_grace(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    _dispatch(
+        deck,
+        "plain-1@example.com",
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2),
+    )
+    plain = ics_sample[
+        ics_sample.index("BEGIN:VEVENT") : ics_sample.index("END:VEVENT")
+        + len("END:VEVENT\n")
+    ]
+    ics.write_text(ics_sample.replace(plain, ""))
+    counts = import_ics(deck, str(ics), "research", prune=True)
+    assert counts["pruned"] == 1
+    assert _count(deck, uid="plain-1@example.com") == 0
+
+
+def test_gcal_not_imported_by_core_modules():
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import mdcal.ics, mdcal.window, sys; "
+            "assert 'googleapiclient' not in sys.modules",
+        ],
+        check=True,
+        env={"PYTHONPATH": "src"},
+    )
+
+
+def test_guarded_missing_lm_raises_even_when_unchanged(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    _dispatch(
+        deck,
+        "plain-1@example.com",
+        dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc),
+    )
+    with pytest.raises(ValueError, match="LAST-MODIFIED"):
+        import_ics(deck, str(ics), "research")
