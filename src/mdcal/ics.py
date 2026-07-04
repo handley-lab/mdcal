@@ -17,6 +17,7 @@ from pathlib import Path
 import icalendar
 import mddb
 import yaml
+from dateutil.rrule import rrulestr
 from slugify import slugify
 
 EVENT_KEYS = (
@@ -34,6 +35,7 @@ EVENT_KEYS = (
     "transp",
     "sequence",
     "rrule",
+    "recurrence_end_epoch",
     "exdate",
     "location",
     "organizer",
@@ -99,6 +101,58 @@ def _ident(value):
 
 def _email(addr):
     return re.sub(r"^mailto:", "", str(addr), flags=re.IGNORECASE)
+
+
+RECURRENCE_FOREVER_EPOCH = 253402300799
+"""The ``recurrence_end_epoch`` sentinel for unbounded rules (9999-12-31Z)."""
+
+
+def normalise_until(rrule):
+    """Coerce a DATE-form ``RRULE`` ``UNTIL`` to end-of-day UTC.
+
+    `dateutil` requires the ``UNTIL`` value be a UTC ``datetime`` when DTSTART is
+    tz-aware, but real Google exports sometimes emit a DATE-form ``UNTIL=20200412``
+    (observed in 2/442 Research masters). Map a date-form ``UNTIL`` to that day's
+    end in UTC; any other form (notably a well-formed ``...Z`` datetime) is left
+    untouched and `dateutil` raises naturally if it is malformed. Shared by the
+    importer (computing ``recurrence_end_epoch``) and the window resolver
+    (expansion), so both read a rule's bound identically.
+
+    Args:
+        rrule: The stored RRULE string (no ``RRULE:`` prefix).
+
+    Returns:
+        The RRULE string with a date-form ``UNTIL`` normalised to UTC.
+    """
+    return re.sub(r"UNTIL=([0-9]{8})(?=;|$)", r"UNTIL=\1T235959Z", rrule)
+
+
+def _recurrence_end_epoch(rrule, dtstart, dtend, all_day):
+    """Epoch of a master's final generated occurrence end (its query bound).
+
+    The resolver prefilters masters to ``recurrence_end_epoch > window_start``,
+    so long-dead recurrences are never loaded or expanded. Semantics mirror the
+    resolver's expansion exactly: the all-day anchor is UTC midnight and every
+    occurrence end is start + (dtend - dtstart). EXDATEs and RECURRENCE-ID
+    exception cards never move this bound — an excluded final slot only leaves
+    the bound conservatively late, and a moved exception is its own concrete
+    card found by its own epochs. Unbounded rules (no COUNT/UNTIL) get
+    `RECURRENCE_FOREVER_EPOCH`. A finite rule generating ZERO instances is
+    real upstream data (Google serves a GAMBIT master whose UNTIL falls the
+    day before its DTSTART); such a master expands to nothing, so its bound
+    is its own ``dtstart``.
+    """
+    if "COUNT=" not in rrule and "UNTIL=" not in rrule:
+        return RECURRENCE_FOREVER_EPOCH
+    anchor = (
+        _dt.datetime(dtstart.year, dtstart.month, dtstart.day, tzinfo=_dt.timezone.utc)
+        if all_day
+        else dtstart
+    )
+    instances = list(rrulestr(normalise_until(rrule), dtstart=anchor))
+    if not instances:
+        return _epoch(dtstart)
+    return _epoch(instances[-1] + (dtend - dtstart))
 
 
 def _epoch(value):
@@ -205,6 +259,11 @@ def vevent_to_card(vevent, source):
         if vevent.get("SEQUENCE") is not None
         else None,
         "rrule": vevent["RRULE"].to_ical().decode() if vevent.get("RRULE") else None,
+        "recurrence_end_epoch": _recurrence_end_epoch(
+            vevent["RRULE"].to_ical().decode(), dtstart, dtend, all_day
+        )
+        if vevent.get("RRULE")
+        else None,
         "exdate": _exdates(vevent, uid) or None,
         "location": str(vevent["LOCATION"]) if vevent.get("LOCATION") else None,
         "organizer": _email(vevent["ORGANIZER"]) if vevent.get("ORGANIZER") else None,

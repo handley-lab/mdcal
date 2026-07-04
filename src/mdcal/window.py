@@ -10,12 +10,13 @@ substrate stays calendar-agnostic.
 """
 
 import datetime as _dt
-import re as _re
 from dataclasses import dataclass
 
 import yaml as _yaml
 from dateutil.rrule import rrulestr
 from mddb import Card
+
+from mdcal.ics import RECURRENCE_FOREVER_EPOCH, normalise_until
 
 _LOADER = getattr(_yaml, "CSafeLoader", _yaml.SafeLoader)
 """SafeLoader semantics on the resolver's hottest path.
@@ -29,24 +30,6 @@ PyYAML builds without libyaml.
 
 def _card(yaml_text, body):
     return Card(yaml=_yaml.load(yaml_text, Loader=_LOADER), body=body)
-
-
-def _normalise_until(rrule):
-    """Coerce a DATE-form ``RRULE`` ``UNTIL`` to end-of-day UTC.
-
-    `dateutil` requires the ``UNTIL`` value be a UTC ``datetime`` when DTSTART is
-    tz-aware, but real Google exports sometimes emit a DATE-form ``UNTIL=20200412``
-    (observed in 2/442 Research masters). Map a date-form ``UNTIL`` to that day's
-    end in UTC; any other form (notably a well-formed ``...Z`` datetime) is left
-    untouched and `dateutil` raises naturally if it is malformed.
-
-    Args:
-        rrule: The stored RRULE string (no ``RRULE:`` prefix).
-
-    Returns:
-        The RRULE string with a date-form ``UNTIL`` normalised to UTC.
-    """
-    return _re.sub(r"UNTIL=([0-9]{8})(?=;|$)", r"UNTIL=\1T235959Z", rrule)
 
 
 @dataclass
@@ -133,16 +116,27 @@ def _suppression_map(db):
     return out
 
 
-def _masters(db, end_epoch):
-    """Fetch every recurring master rooted before ``end_epoch``.
+def _masters(db, start_epoch, end_epoch):
+    """Fetch the recurring masters whose recurrence overlaps the window.
 
-    Same shape as `_suppression_map`: two single-pass index scans joined in
-    Python instead of a nested-loop SQL join over two ``entry_fields`` key
-    ranges (measured 205ms → ~5ms on the 3,867-card deck).
+    Same shape as `_suppression_map`: single-pass index scans joined in
+    Python instead of a nested-loop SQL join over ``entry_fields`` key
+    ranges (measured 205ms → ~5ms on the 3,867-card deck). The
+    ``recurrence_end_epoch`` bound (importer-computed) keeps long-dead
+    recurrences from ever being loaded or expanded — on this deck it cuts
+    the masters parsed per window from 442 to the few actually alive in it.
+    A master without the bound (authored before the field existed) reads as
+    unbounded: never hidden, merely unfiltered until its next re-render.
     """
     starts = dict(
         db.conn.execute(
             "SELECT entry_rowid, value_num FROM entry_fields WHERE key='dtstart_epoch'"
+        ).fetchall()
+    )
+    ends = dict(
+        db.conn.execute(
+            "SELECT entry_rowid, value_num FROM entry_fields "
+            "WHERE key='recurrence_end_epoch'"
         ).fetchall()
     )
     rowids = [
@@ -151,7 +145,10 @@ def _masters(db, end_epoch):
             "SELECT entry_rowid FROM entry_fields WHERE key='rrule'"
         )
         if starts[rowid] < end_epoch
+        and ends.get(rowid, RECURRENCE_FOREVER_EPOCH) > start_epoch
     ]
+    if not rowids:
+        return []
     marks = ",".join("?" * len(rowids))
     return db.conn.execute(
         f"SELECT yaml_text, body FROM entries WHERE rowid IN ({marks})", rowids
@@ -169,7 +166,7 @@ def _expand_master(card, start, end, start_epoch, end_epoch, suppression):
         if all_day
         else dtstart
     )
-    rule = rrulestr(_normalise_until(card.yaml["rrule"]), dtstart=anchor)
+    rule = rrulestr(normalise_until(card.yaml["rrule"]), dtstart=anchor)
     suppress = {_instant(d) for d in card.yaml.get("exdate", [])}
     suppress |= suppression.get(card.yaml["uid"], set())
     out = []
@@ -208,7 +205,7 @@ def events_in_window(db, start, end):
     start_epoch, end_epoch = _instant(start), _instant(end)
     occurrences = _concrete(db, start_epoch, end_epoch)
     suppression = _suppression_map(db)
-    masters = _masters(db, end_epoch)
+    masters = _masters(db, start_epoch, end_epoch)
     for yaml_text, body in masters:
         occurrences.extend(
             _expand_master(
