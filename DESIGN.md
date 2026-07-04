@@ -142,13 +142,36 @@ overlays land. `STATUS:CANCELLED` already stays as a card (the resolver hides it
    offline devices → frontmatter conflict → invalid YAML → surfaced in the grid for resolution via
    `conflict_rationales()`. The conflict scanner must work at git/filesystem level, because invalid
    YAML makes `db.read`/rebuild raise *before* the grid can query.
-2. **Subscribed feed = one-way ICS pull** (web → deck; read-only ingest now, local overlay
-   later — see §Subscribed external feeds). Not git, not the merge driver — `curl` + the
-   `mdcal-import` CLI on a timer; the Python is `import_ics` itself.
+2. **Feed = ICS pull inbound; for *synced* sources, Google API write-through outbound.** Inbound
+   stays `curl` + the `mdcal-import` CLI on a timer. A source marked *synced* (a `calendar_id`
+   column in the deployment's feeds config) is additionally **writable through the Google
+   Calendar API, synchronously in-request**: `events.import` carrying the card's own iCalUID
+   (measured: import upserts — same Google id on re-import, content updated; stale `SEQUENCE`
+   rejected 400, so writers increment from the existing card), deletes via
+   `list(iCalUID, showDeleted=True)` → delete (deleted items are served `status: cancelled`
+   with a usable `updated` — the delete watermark). Google is primary: API failure → HTTP 502
+   and **no local mutation**; API success → local mutation carrying a non-owned
+   `dispatched: <API updated, tz-aware, truncated to seconds>` guard — measured: the feed's
+   `LAST-MODIFIED` equals the API's `updated` exactly at second precision, and the feed
+   reflects API writes in **~2 minutes** each way (grace window: 1 h). The importer protects
+   guarded cards from the lagging feed (skip updates while `last_modified < dispatched`;
+   prune-exempt within the grace window) until the feed catches up and converges the card —
+   then the guard is inert. Every
+   crash window between Google and the deck self-heals via the poll, which is why **no outbox
+   is used on this pipe** (see §Interop). EXDATE fidelity through `import`: measured faithful
+   for both timed Z-form-vs-TZID and all-day date-form exclusions.
 3. **Invites to/from others = iMIP email** (an invite is an `.ics`-bearing email; RSVP returns by
-   email). The interop boundary; unrelated to (1) and (2). No retained Google API credential.
+   email). The interop boundary; unrelated to (1) and (2).
 
 ## Interop and the outbox
+
+**Scope: the outbox is for iMIP email (irreversible sends) and, later, multi-clone dispatch —
+NOT for Google API write-back.** Adversarial design review of the write-back slice concluded:
+feed lag attacks the *importer* whichever way dispatch works, so the `dispatched` guard is
+required regardless — and with Google primary and its API ops idempotent (import-upsert,
+absolute patch, 404-tolerant delete), synchronous write-through has no durable divergence
+windows, while an outbox adds them (permanently-pending cards pinning prune exemptions, retry
+reordering resurrecting old edits, source labels that lie until dispatch).
 
 Sending an invite is an **irreversible external effect**; a merge/replay must not re-fire it. The
 mddb merge-driver PR defers a generic outbox — mdcal **owns the boundary in the layer**, does not

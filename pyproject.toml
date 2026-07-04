@@ -26,6 +26,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+gcal = ["google-api-python-client", "google-auth", "google-auth-httplib2"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]
