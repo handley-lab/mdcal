@@ -1,10 +1,12 @@
 import datetime as dt
+from zoneinfo import ZoneInfo
 
 import mddb
 import pytest
 
 from mdcal.ics import import_ics
-from mdcal.window import _normalise_until, events_in_window
+from mdcal.ics import normalise_until
+from mdcal.window import events_in_window
 
 VTZ = """\
 BEGIN:VTIMEZONE
@@ -283,16 +285,16 @@ def test_empty_window(tmp_path):
     assert events_in_window(db, _utc(2025, 1, 1), _utc(2025, 2, 1)) == []
 
 
-def test_normalise_until():
-    assert _normalise_until("FREQ=WEEKLY;UNTIL=20200412;BYDAY=MO") == (
+def testnormalise_until():
+    assert normalise_until("FREQ=WEEKLY;UNTIL=20200412;BYDAY=MO") == (
         "FREQ=WEEKLY;UNTIL=20200412T235959Z;BYDAY=MO"
     )
     assert (
-        _normalise_until("FREQ=WEEKLY;UNTIL=20200412")
+        normalise_until("FREQ=WEEKLY;UNTIL=20200412")
         == "FREQ=WEEKLY;UNTIL=20200412T235959Z"
     )
     unchanged = "FREQ=WEEKLY;UNTIL=20201022T225959Z;BYDAY=FR"
-    assert _normalise_until(unchanged) == unchanged
+    assert normalise_until(unchanged) == unchanged
 
 
 def test_date_form_until_tz_aware_master(tmp_path):
@@ -338,3 +340,116 @@ def test_naive_window_raises(tmp_path):
     )
     with pytest.raises(ValueError, match="naive"):
         events_in_window(db, dt.datetime(2024, 1, 1), dt.datetime(2024, 2, 1))
+
+
+def _master_card(
+    rrule,
+    dtstart="DTSTART;TZID=Europe/London:20200106T090000",
+    dtend="DTEND;TZID=Europe/London:20200106T100000",
+):
+    import icalendar
+
+    from mdcal.ics import vevent_to_card
+
+    cal = (
+        "BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\nBEGIN:VEVENT\n"
+        f"UID:bound@x\nSUMMARY:Bound test\n{dtstart}\n{dtend}\n"
+        f"RRULE:{rrule}\nSTATUS:CONFIRMED\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+    vevent = list(icalendar.Calendar.from_ical(cal).walk("VEVENT"))[0]
+    return vevent_to_card(vevent, "research")
+
+
+def test_recurrence_end_epoch_count():
+    card = _master_card("FREQ=WEEKLY;COUNT=3")
+    last_end = dt.datetime(2020, 1, 20, 10, 0, tzinfo=ZoneInfo("Europe/London"))
+    assert card.yaml["recurrence_end_epoch"] == int(last_end.timestamp())
+
+
+def test_recurrence_end_epoch_date_form_until():
+    card = _master_card("FREQ=WEEKLY;UNTIL=20200412")
+    ends = card.yaml["recurrence_end_epoch"]
+    last_start = dt.datetime(2020, 4, 6, 9, 0, tzinfo=ZoneInfo("Europe/London"))
+    assert ends == int((last_start + dt.timedelta(hours=1)).timestamp())
+
+
+def test_recurrence_end_epoch_unbounded_sentinel():
+    from mdcal.ics import RECURRENCE_FOREVER_EPOCH
+
+    card = _master_card("FREQ=WEEKLY")
+    assert card.yaml["recurrence_end_epoch"] == RECURRENCE_FOREVER_EPOCH
+
+
+def test_recurrence_end_epoch_all_day():
+    card = _master_card(
+        "FREQ=DAILY;COUNT=2",
+        dtstart="DTSTART;VALUE=DATE:20200106",
+        dtend="DTEND;VALUE=DATE:20200107",
+    )
+    last_end = dt.datetime(2020, 1, 8, tzinfo=dt.timezone.utc)
+    assert card.yaml["recurrence_end_epoch"] == int(last_end.timestamp())
+
+
+def test_dead_master_not_loaded(tmp_path):
+    db = _seed(
+        tmp_path,
+        "BEGIN:VEVENT\nUID:dead@x\nSUMMARY:Dead weekly\n"
+        "DTSTART;TZID=Europe/London:20200106T090000\n"
+        "DTEND;TZID=Europe/London:20200106T100000\n"
+        "RRULE:FREQ=WEEKLY;COUNT=3\nSTATUS:CONFIRMED\nEND:VEVENT\n",
+    )
+    from mdcal import window
+
+    assert (
+        window._masters(
+            db,
+            int(dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc).timestamp()),
+            int(dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc).timestamp()),
+        )
+        == []
+    )
+    assert (
+        events_in_window(
+            db,
+            dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc),
+        )
+        == []
+    )
+    live = events_in_window(
+        db,
+        dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+        dt.datetime(2020, 2, 1, tzinfo=dt.timezone.utc),
+    )
+    assert len(live) == 3
+
+
+def test_unbounded_master_without_field_still_loads(tmp_path):
+    db = _seed(
+        tmp_path,
+        "BEGIN:VEVENT\nUID:legacy@x\nSUMMARY:Legacy weekly\n"
+        "DTSTART;TZID=Europe/London:20200106T090000\n"
+        "DTEND;TZID=Europe/London:20200106T100000\n"
+        "RRULE:FREQ=WEEKLY;COUNT=400\nSTATUS:CONFIRMED\nEND:VEVENT\n",
+    )
+    cid = db.conn.execute("SELECT id FROM entries").fetchone()[0]
+    with db.editor(rationale="strip bound (pre-field card)") as e:
+        card = e.read(cid)
+        del card.yaml["recurrence_end_epoch"]
+        e.update(card, summary=card.summary)
+    db = mddb.MDDB(str(tmp_path / "deck"))
+    occ = events_in_window(
+        db,
+        dt.datetime(2020, 3, 2, tzinfo=dt.timezone.utc),
+        dt.datetime(2020, 3, 9, tzinfo=dt.timezone.utc),
+    )
+    assert len(occ) == 1
+
+
+def test_recurrence_end_epoch_zero_instance_rule():
+    card = _master_card(
+        "FREQ=WEEKLY;UNTIL=20200105T235959Z;BYDAY=TH",
+        dtstart="DTSTART;TZID=Europe/London:20200106T090000",
+        dtend="DTEND;TZID=Europe/London:20200106T100000",
+    )
+    assert card.yaml["recurrence_end_epoch"] == card.yaml["dtstart_epoch"]
