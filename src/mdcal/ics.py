@@ -37,6 +37,7 @@ EVENT_KEYS = (
     "rrule",
     "recurrence_end_epoch",
     "exdate",
+    "rdate",
     "location",
     "organizer",
     "attendee_emails",
@@ -132,7 +133,7 @@ def normalise_until(rrule):
     return re.sub(r"UNTIL=([0-9]{8})(?=;|$)", r"UNTIL=\1T235959Z", rrule)
 
 
-def _recurrence_end_epoch(rrule, dtstart, dtend, all_day):
+def _recurrence_end_epoch(rrule, dtstart, dtend, all_day, rdates=()):
     """Epoch of a master's final generated occurrence end (its query bound).
 
     The resolver prefilters masters to ``recurrence_end_epoch > window_start``,
@@ -145,19 +146,26 @@ def _recurrence_end_epoch(rrule, dtstart, dtend, all_day):
     `RECURRENCE_FOREVER_EPOCH`. A finite rule generating ZERO instances is
     real upstream data (Google serves a GAMBIT master whose UNTIL falls the
     day before its DTSTART); such a master expands to nothing, so its bound
-    is its own ``dtstart``.
+    is its own ``dtstart``. RDATEs extend a bounded rule (a series prolonged
+    by explicit dates after its UNTIL), so the bound covers the last RDATE's
+    occurrence end too.
     """
     if "COUNT=" not in rrule and "UNTIL=" not in rrule:
         return RECURRENCE_FOREVER_EPOCH
+    rdate_bound = max((_epoch(r) for r in rdates), default=None)
     anchor = (
         _dt.datetime(dtstart.year, dtstart.month, dtstart.day, tzinfo=_dt.timezone.utc)
         if all_day
         else dtstart
     )
     instances = list(rrulestr(normalise_until(rrule), dtstart=anchor))
-    if not instances:
-        return _epoch(dtstart)
-    return _epoch(instances[-1] + (dtend - dtstart))
+    rule_bound = (
+        _epoch(instances[-1] + (dtend - dtstart)) if instances else _epoch(dtstart)
+    )
+    duration = int((dtend - dtstart).total_seconds())
+    if rdate_bound is not None:
+        return max(rule_bound, rdate_bound + duration)
+    return rule_bound
 
 
 def _epoch(value):
@@ -189,7 +197,15 @@ def _point(prop, uid):
 
 
 def _exdates(vevent, uid):
-    raw = vevent.get("EXDATE")
+    return _date_list(vevent, "EXDATE", uid)
+
+
+def _rdates(vevent, uid):
+    return _date_list(vevent, "RDATE", uid)
+
+
+def _date_list(vevent, key, uid):
+    raw = vevent.get(key)
     if raw is None:
         return []
     groups = raw if isinstance(raw, list) else [raw]
@@ -265,11 +281,16 @@ def vevent_to_card(vevent, source):
         else None,
         "rrule": vevent["RRULE"].to_ical().decode() if vevent.get("RRULE") else None,
         "recurrence_end_epoch": _recurrence_end_epoch(
-            vevent["RRULE"].to_ical().decode(), dtstart, dtend, all_day
+            vevent["RRULE"].to_ical().decode(),
+            dtstart,
+            dtend,
+            all_day,
+            _rdates(vevent, uid),
         )
         if vevent.get("RRULE")
         else None,
         "exdate": _exdates(vevent, uid) or None,
+        "rdate": _rdates(vevent, uid) or None,
         "location": str(vevent["LOCATION"]) if vevent.get("LOCATION") else None,
         "organizer": _email(vevent["ORGANIZER"]) if vevent.get("ORGANIZER") else None,
         "attendee_emails": _attendees(vevent) or None,

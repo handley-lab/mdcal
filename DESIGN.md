@@ -72,7 +72,9 @@ calendars is **not** auto-collapsed into one card; cross-calendar coalescing, if
 ## Recurrence and overlays — one pattern: base + overlay, resolved at read time
 
 A recurring event is **one master card** holding the rule, not N materialised instances. The master
-carries `rrule` + `exdate` (a flat date list, top-level/indexed) + an `overrides` block keyed by
+carries `rrule` + `exdate` + `rdate` (flat date lists, top-level/indexed; RDATEs add explicit
+occurrences beyond the rule — real series were prolonged past their UNTIL that way, and the
+master's `recurrence_end_epoch` bound covers the last RDATE) + an `overrides` block keyed by
 `recurrence_id` (each: moved time / new title / `cancelled`).
 
 **Read-time resolution** (per visible window): expand the master's `rrule` → drop `exdate`s → for
@@ -133,8 +135,10 @@ the fenced VEVENT — with these semantics it is serialisation metadata, not eve
 flat yaml's `created`/`last_modified` come from the stable CREATED/LAST-MODIFIED). Hourly
 polling ships only after a captured re-fetch pair imports as create-then-no-op. Feed URLs come in two
 flavours: *public* (`…/ical/<id>/public/basic.ics`) and per-user *secret*
-(`…/ical/<id>/private-<token>/basic.ics`) for private calendars — the secret token is a
-committed credential of the private deployment repo.
+(`…/ical/<id>/private-<token>/basic.ics`). Secret URLs are NOT used for calendars we hold the
+OAuth credential to — owned calendars pull via `mdcal-pull` (§Sync pipe 2), so no per-calendar
+secret read token is harvested or committed; a URL feed line is only for genuinely external
+sources (public calendars, third-party `.ics`).
 
 **Deferred to the overlay slice** (needed once feed events take local annotations): the
 base+overlay split — a **base** section the fetcher overwrites each pull, an **adjustments**
@@ -223,7 +227,7 @@ dep, never mddb); the importer only re-serialises the `RRULE` string, while **re
 expansion** (`mdcal/window.py`, `events_in_window`) uses `python-dateutil` to expand masters over a
 view window. Each upstream `RECURRENCE-ID` component
 is written as **its own card** keyed `uid+recurrence_id` (a Google export's overrides are
-content-bearing by construction); masters keep `rrule+exdate`; read-time resolution suppresses a
+content-bearing by construction); masters keep `rrule+exdate+rdate`; read-time resolution suppresses a
 master-generated instance when an exception card with that `uid+recurrence_id` exists. Import is
 **idempotent** on `source_calendar + uid + recurrence_id`. Archival calendars (no events after 2024)
 import once and sit read-only.

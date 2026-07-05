@@ -8,6 +8,8 @@ from mdcal.ics import import_ics
 from mdcal.ics import normalise_until
 from mdcal.window import events_in_window
 
+UTC = dt.timezone.utc
+
 VTZ = """\
 BEGIN:VTIMEZONE
 TZID:Europe/London
@@ -453,3 +455,57 @@ def test_recurrence_end_epoch_zero_instance_rule():
         dtend="DTEND;TZID=Europe/London:20200106T100000",
     )
     assert card.yaml["recurrence_end_epoch"] == card.yaml["dtstart_epoch"]
+
+
+def test_rdate_extends_series_beyond_until(tmp_path):
+    ics = tmp_path / "r.ics"
+    ics.write_text(
+        "BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n"
+        "BEGIN:VEVENT\n"
+        "UID:rd-1@example.com\n"
+        "DTSTAMP:20260101T120000Z\n"
+        "DTSTART;TZID=Europe/London:20260105T130000\n"
+        "DTEND;TZID=Europe/London:20260105T133000\n"
+        "RRULE:FREQ=WEEKLY;UNTIL=20260119T235959Z;BYDAY=MO\n"
+        "RDATE;TZID=Europe/London:20260210T130000,20260224T130000\n"
+        "SEQUENCE:0\nSTATUS:CONFIRMED\nSUMMARY:Extended series\n"
+        "END:VEVENT\nEND:VCALENDAR\n"
+    )
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "test")
+    db = mddb.MDDB(deck)
+    bound = db.conn.execute(
+        "SELECT value_num FROM entry_fields WHERE key='recurrence_end_epoch'"
+    ).fetchone()[0]
+    assert bound >= dt.datetime(2026, 2, 24, 13, 30, tzinfo=UTC).timestamp()
+    occ = events_in_window(
+        db,
+        dt.datetime(2026, 2, 1, tzinfo=UTC),
+        dt.datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    starts = sorted(o.start.isoformat() for o in occ)
+    assert starts == ["2026-02-10T13:00:00+00:00", "2026-02-24T13:00:00+00:00"]
+
+
+def test_rdate_duplicate_of_generated_instance_not_doubled(tmp_path):
+    ics = tmp_path / "r.ics"
+    ics.write_text(
+        "BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n"
+        "BEGIN:VEVENT\n"
+        "UID:rd-2@example.com\n"
+        "DTSTAMP:20260101T120000Z\n"
+        "DTSTART;TZID=Europe/London:20260105T130000\n"
+        "DTEND;TZID=Europe/London:20260105T133000\n"
+        "RRULE:FREQ=WEEKLY;UNTIL=20260119T235959Z;BYDAY=MO\n"
+        "RDATE;TZID=Europe/London:20260112T130000\n"
+        "SEQUENCE:0\nSTATUS:CONFIRMED\nSUMMARY:Overlapping rdate\n"
+        "END:VEVENT\nEND:VCALENDAR\n"
+    )
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "test")
+    occ = events_in_window(
+        mddb.MDDB(deck),
+        dt.datetime(2026, 1, 12, tzinfo=UTC),
+        dt.datetime(2026, 1, 13, tzinfo=UTC),
+    )
+    assert len(occ) == 1
