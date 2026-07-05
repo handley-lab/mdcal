@@ -307,15 +307,30 @@ def test_export_ics_round_trips_through_import(monkeypatch, tmp_path):
         recurringEventId="m1",
         originalStartTime=_timed("2026-01-12T10:00:00Z", "UTC"),
     )
+    master["htmlLink"] = "https://calendar.google.com/event?eid=abc"
     fake = _FakeExportService(pages=[[master, exception]])
     monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
     ics = tmp_path / "owned.ics"
-    ics.write_text(gcal.export_ics(None, "cal"))
+    ics.write_text(gcal.export_ics(None, "my-cal@group.calendar.google.com"))
     deck = str(tmp_path / "deck")
     counts = import_ics(deck, str(ics), "owned", tags=["area/work"])
     assert counts == {"created": 2, "updated": 0, "skipped": 0, "pruned": 0}
     again = import_ics(deck, str(ics), "owned", tags=["area/work"])
     assert again["skipped"] == 2 and again["created"] == 0
+
+    import mddb
+
+    db = mddb.MDDB(deck)
+    cards = {
+        db.read(cid).yaml["gcal_id"]: db.read(cid).yaml
+        for (cid,) in db.conn.execute("SELECT id FROM entries")
+    }
+    # both cards carry the origin calendar; each its own Google event id
+    assert set(cards) == {"m1", "e1"}
+    assert all(
+        y["gcal_calendar"] == "my-cal@group.calendar.google.com" for y in cards.values()
+    )
+    assert cards["m1"]["gcal_link"] == "https://calendar.google.com/event?eid=abc"
 
 
 def test_export_ics_recurrence_exdate_rdate_lines(monkeypatch, tmp_path):

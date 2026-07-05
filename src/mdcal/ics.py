@@ -45,6 +45,9 @@ EVENT_KEYS = (
     "conference_url",
     "created",
     "last_modified",
+    "gcal_id",
+    "gcal_calendar",
+    "gcal_link",
 )
 """Flat YAML keys owned by `vevent_to_card` on every event card.
 
@@ -298,6 +301,15 @@ def vevent_to_card(vevent, source):
         "attendee_emails": _attendees(vevent) or None,
         "conference_url": str(vevent["X-GOOGLE-CONFERENCE"])
         if vevent.get("X-GOOGLE-CONFERENCE")
+        else None,
+        "gcal_id": str(vevent["X-GOOGLE-EVENT-ID"])
+        if vevent.get("X-GOOGLE-EVENT-ID")
+        else None,
+        "gcal_calendar": str(vevent["X-GOOGLE-CALENDAR-ID"])
+        if vevent.get("X-GOOGLE-CALENDAR-ID")
+        else None,
+        "gcal_link": str(vevent["X-GOOGLE-HTML-LINK"])
+        if vevent.get("X-GOOGLE-HTML-LINK")
         else None,
         "created": vevent["CREATED"].dt if vevent.get("CREATED") else None,
         "last_modified": vevent["LAST-MODIFIED"].dt

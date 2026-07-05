@@ -178,8 +178,7 @@ def _hide_policy(db):
 
 
 def _suppression_map(db):
-    """Map each ``(source, uid)`` to the recurrence-id epochs its exception
-    cards override.
+    """Map each ``(source, uid)`` to the recurrence-id epochs it overrides.
 
     Keyed by ``(source, uid)``, not ``uid``: the same iCal UID in two sources
     is two distinct events (mdcal's sync identity is ``source + uid +
