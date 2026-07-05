@@ -155,7 +155,19 @@ overlays land. `STATUS:CANCELLED` already stays as a card (the resolver hides it
    `conflict_rationales()`. The conflict scanner must work at git/filesystem level, because invalid
    YAML makes `db.read`/rebuild raise *before* the grid can query.
 2. **Feed = ICS pull inbound; for *synced* sources, Google API write-through outbound.** Inbound
-   stays `curl` + the `mdcal-import` CLI on a timer. A source marked *synced* (a `calendar_id`
+   is `curl` + the `mdcal-import` CLI on a timer for EXTERNAL feeds; for calendars we hold the
+   OAuth credential to (Will-owned), `mdcal-pull` replaces `curl`: it API-exports the calendar
+   (`events.list`, `singleEvents=false`, full-span, paginated to exhaustion — a failed page
+   raises before any output, so `--prune` never sees a partial identity set) and synthesizes the
+   same VCALENDAR shape the secret feed serves. Verified byte-equivalent for import identity on
+   the research calendar (3,880/3,880 `(uid, recurrence_id)` match): cancelled recurring
+   instances — API-served as `status: cancelled` child resources — fold into master `EXDATE`s
+   exactly as Google's own ICS export does, and `RECURRENCE-ID`/`EXDATE` serialize in the
+   MASTER's zone (exceptions can carry a different `originalStartTime.timeZone`; the feed uses
+   the series' zone, and mddb's identity is the serialized string). This is a VEVENT SUBSET
+   synthesized from the API event resource — no VTIMEZONE blocks or X- props; raw ICS stays the
+   fidelity reference for external URL feeds. No secret iCal URLs exist for owned calendars: one
+   OAuth credential replaces N per-calendar read tokens. A source marked *synced* (a `calendar_id`
    column in the deployment's feeds config) is additionally **writable through the Google
    Calendar API, synchronously in-request**: `events.import` carrying the card's own iCalUID
    (measured: import upserts — same Google id on re-import, content updated; stale `SEQUENCE`
@@ -199,9 +211,13 @@ wait for the substrate (both reviewers converged on this independently):
 
 ## Import / migration
 
-Source = the Google Calendar **`.ics` export** (verified faithful: carries `UID`, `ORGANIZER`,
-`STATUS`, `SEQUENCE`, `TRANSP`, `RRULE`, `RECURRENCE-ID`, `EXDATE` — all of which the Google API and
-its MCP drop; the API also returns expanded instances, not masters). The `.ics` *is* RFC 5545, so it
+Source = a Google Calendar **`.ics` document** — either the raw `.ics` export/feed (external
+URL feeds; the historical migration export), or, for owned calendars, the VCALENDAR that
+`mdcal-pull` synthesizes from the API (`events.list` with `singleEvents=false` returns masters
+plus `RECURRENCE-ID` exception resources — the early note that "the API returns expanded
+instances, not masters" described the default `singleEvents=true` mode and the MCP wrapper,
+not the API's capability; see §Sync pipe 2 for what the synthesis preserves and drops). Either
+way the importer consumes RFC 5545, so it
 maps ~1:1 onto VEVENT-shaped cards with least translation. Import parses with `icalendar` (an mdcal
 dep, never mddb); the importer only re-serialises the `RRULE` string, while **read-time recurrence
 expansion** (`mdcal/window.py`, `events_in_window`) uses `python-dateutil` to expand masters over a
