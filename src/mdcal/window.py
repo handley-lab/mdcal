@@ -1,6 +1,6 @@
 """Resolve an mddb calendar deck into the event occurrences within a time window.
 
-Recurring masters carry an ``rrule``+``exdate`` and are expanded at read time
+Recurring masters carry ``rrule``+``exdate``+``rdate`` and are expanded at read time
 (plain instances are never materialised); RECURRENCE-ID exceptions are their own
 cards keyed ``uid``+``recurrence_id``. `events_in_window` returns the occurrences
 overlapping a half-open window — expanding masters, subtracting EXDATEs, and

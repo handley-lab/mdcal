@@ -77,7 +77,8 @@ occurrences beyond the rule — real series were prolonged past their UNTIL that
 master's `recurrence_end_epoch` bound covers the last RDATE) + an `overrides` block keyed by
 `recurrence_id` (each: moved time / new title / `cancelled`).
 
-**Read-time resolution** (per visible window): expand the master's `rrule` → drop `exdate`s → for
+**Read-time resolution** (per visible window): expand the master's `rrule` → union `rdate`s
+(deduplicated against generated instants) → drop `exdate`s → for
 each `recurrence_id`, suppress the generated instance (its exception card renders concretely at its own
 time). Implemented in `mdcal/window.py` (`events_in_window`). **Conclusion: read-time expansion is the
 model; no materialised instance cache.** Performance (measured on the live 442-master Research deck):
