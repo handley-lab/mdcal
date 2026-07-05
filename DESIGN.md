@@ -27,10 +27,11 @@ primitives. Design choices must not paint that arc into a corner.
 - **Decks** — the calendar data. Each deck is its **own private GitHub repo**, living in neither
   app repo, cloned to a local path chosen by the *deployment* (the mdcal library takes the deck path
   as an argument and implies no privileged location; Alan's deployment uses `/var/lib/mdcal/<deck>`,
-  FHS-correct application state mirroring `/var/lib/alan-loop`). The grid app
-  overlays multiple decks and toggles each (work / home / polychord / subscribed) like Google's
-  left-hand calendar list. Multiple calendars = separate decks unified in one view, *not* a field
-  within one deck.
+  FHS-correct application state mirroring `/var/lib/alan-loop`). **Deck = audience;
+  calendar = per-card `source`.** A deck holds many sources — two calendars share a deck
+  exactly when their sharing circle is identical. The grid overlays decks and slices by
+  *tags*; `source` is sync/provenance plumbing (import identity, prune scope, write-back
+  routing), not a UI concept.
 
 ## Event model
 
@@ -40,7 +41,7 @@ primitives. Design choices must not paint that arc into a corner.
 |---|---|---|
 | `SUMMARY` (short title) | `title` | NB: iCal `SUMMARY` ≠ mddb `summary` |
 | `DESCRIPTION` | `body` | human notes / original description |
-| `CATEGORIES` | `tags` | |
+| `CATEGORIES` | `tags` | seeds at card creation ONLY — see below |
 | — | `summary` | mddb's mandatory disclosure one-liner; mdcal must supply a real value |
 
 Everything else is **flat layer YAML** modelled on VEVENT defaults, indexed by mddb's
@@ -54,6 +55,13 @@ Google feeds stamp with the serve time — volatile serialisation metadata, see 
 external feeds) so import bugs are fixable without re-exporting. Byte-original
 preservation and full VTIMEZONE/semantic re-export fidelity are deferred (an importer that needs
 faithful outbound re-serialisation would split the source `.ics` into original VEVENT byte spans).
+
+**Tags are deck-owned after creation.** Inbound `CATEGORIES` (plus any per-feed seed tags)
+populate `tags` when a card is CREATED; no re-render path — importer update, web edit,
+cancel — ever passes `tags=` again, so local classification (`area/*`, `mdcal/hidden`)
+survives every upstream change. Outbound is symmetric: Google write-back builds its event
+body from uid/title/sequence/times/location/description/recurrence only — it never sends
+tags/`CATEGORIES` — so retagging never touches Google.
 
 **`uid` (iCal) is a layer field, distinct from mddb `id`** (a substrate-owned UUIDv4). Imported and
 subscribed events carry an upstream `uid` preserved for sync-by-uid. mddb does **not** enforce `uid`
@@ -107,8 +115,12 @@ ordinary flat importer cards keyed `source + uid + recurrence_id`, with **prune-
 deleted, git history serving as the tombstone. Prune is only sound against a feed serving the
 calendar's **full historical span** — verified per feed before it ships (both Google URL
 flavours checked live: spans back to the oldest events, counts matching the deck). The layer
-invariant makes prune lossless: web/local edits are forbidden on feed-sourced cards
-(`source != local` is read-only), so pruned cards carry nothing local. `--prune` refuses
+invariant keeps prune nearly lossless: event CONTENT is read-only on feed-sourced cards
+(`source != local`), with one narrow exception — non-owned **tag annotations**
+(`mdcal/hidden`, `area/*`) are writable, survive re-render because tags are deck-owned
+after creation, and do NOT survive upstream deletion (prune takes the card, tags included;
+the base+overlay/tombstone slice below stays deferred for annotations that must outlive
+upstream deletion). `--prune` refuses
 `--uid`/`--limit` — a partial import's identity set would mass-delete the unselected remainder.
 
 Google's ICS endpoints send **no ETag / no Last-Modified** (`cache-control: no-store`), so

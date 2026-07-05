@@ -50,6 +50,11 @@ The shared write contract: any writer that re-renders a card (a re-import, a
 web edit) strips exactly these keys from the existing YAML before applying a
 fresh render, so fields the source dropped don't linger while non-owned local
 keys survive.
+
+``tags`` is deliberately NOT here: iCal ``CATEGORIES`` seed a card's tags at
+creation, after which tags are deck-owned local classification — no re-render
+path may pass ``tags=`` to ``editor.update``, so retags (``area/*``,
+``mdcal/hidden``) survive every upstream change.
 """
 
 GRACE = _dt.timedelta(hours=1)
@@ -401,24 +406,33 @@ def _guarded(card, existing):
     return card.yaml["last_modified"] < dispatched
 
 
+def _seeded_tags(card_tags, seed_tags):
+    """Ordered duplicate-free union of a new card's CATEGORIES and seed tags."""
+    return list(dict.fromkeys([*card_tags, *seed_tags]))
+
+
 def _unchanged(card, existing):
     existing_importer = {k: v for k, v in existing.yaml.items() if k in EVENT_KEYS}
     return (
         card.title == existing.title
         and card.summary == existing.summary
         and card.body == existing.body
-        and card.tags == existing.yaml.get("tags", [])
         and card.yaml == existing_importer
     )
 
 
-def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
+def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=()):
     """Idempotently import an `.ics` calendar into the mddb deck at `deck`.
 
     Opens (or initialises) the deck, renders one card per VEVENT, and within a
     per-year `db.editor` block creates new cards, updates changed ones, and skips
     unchanged ones — keyed on ``source + uid + recurrence_id``. A year with no
     creates/updates opens no editor block, so a clean re-import produces no commit.
+
+    Tags are deck-owned after creation: a new card's tags are seeded once
+    (feed ``CATEGORIES`` first, then ``tags`` values not already present) and
+    updates never touch them, so local classification (``area/*``,
+    ``mdcal/hidden``) survives every upstream change.
 
     Args:
         deck: Path to the deck (created via `mddb.MDDB.init` if absent).
@@ -431,6 +445,7 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
             span, where an absent event means an upstream deletion. Cards of
             other sources (``local``, …) are never touched; git history is the
             tombstone. Nothing to prune opens no editor block.
+        tags: Seed tags applied to CREATED cards only.
 
     Returns:
         A ``{"created": int, "updated": int, "skipped": int, "pruned": int}``
@@ -473,10 +488,11 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
         with db.editor(rationale=f"import {source} {year}") as editor:
             for card, cid in actions:
                 if cid is None:
+                    seeded = _seeded_tags(card.tags, tags)
                     editor.create(
                         title=card.title,
                         summary=card.summary,
-                        tags=card.tags or None,
+                        tags=seeded or None,
                         body=card.body,
                         relpath=card.relpath,
                         yaml=card.yaml,
@@ -493,9 +509,7 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
                     kept.update(card.yaml)
                     existing_card.yaml = kept
                     existing_card.body = card.body
-                    editor.update(
-                        existing_card, summary=card.summary, tags=card.tags or ()
-                    )
+                    editor.update(existing_card, summary=card.summary)
                     year_updated += 1
         counts["created"] += year_created
         counts["updated"] += year_updated
@@ -541,18 +555,25 @@ def main(argv=None):
     parser.add_argument("--limit", type=int)
     parser.add_argument("--uid")
     parser.add_argument("--prune", action="store_true")
+    parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="seed tag applied to created cards only (repeatable)",
+    )
     args = parser.parse_args(argv)
 
     if args.dry_run:
         for vevent in _vevents(args.ics, args.uid, args.limit):
             card = vevent_to_card(vevent, args.source)
+            card.tags = _seeded_tags(card.tags, args.tag)
             print(f"# ===== {card.relpath} =====")
             print(render_text(card))
         return
     if not args.deck:
         parser.error("--deck is required unless --dry-run")
     counts = import_ics(
-        args.deck, args.ics, args.source, args.uid, args.limit, args.prune
+        args.deck, args.ics, args.source, args.uid, args.limit, args.prune, args.tag
     )
     print(
         f"created={counts['created']} updated={counts['updated']} "
