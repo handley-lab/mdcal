@@ -567,3 +567,164 @@ def test_exdate_suppresses_across_dst(tmp_path):
         dt.datetime(2026, 7, 13, tzinfo=UTC),
     )
     assert occ == []
+
+
+def _weekly(tmp_path, extra_yaml=""):
+    ics = tmp_path / "h.ics"
+    ics.write_text(
+        "BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n"
+        "BEGIN:VEVENT\n"
+        "UID:hide-1@example.com\n"
+        "DTSTAMP:20260101T120000Z\n"
+        "DTSTART;TZID=Europe/London:20260504T130000\n"
+        "DTEND;TZID=Europe/London:20260504T133000\n"
+        "RRULE:FREQ=WEEKLY;COUNT=6;BYDAY=MO\n"
+        "SEQUENCE:0\nSTATUS:CONFIRMED\nSUMMARY:Seminar\n"
+        "END:VEVENT\nEND:VCALENDAR\n"
+    )
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "test")
+    if extra_yaml:
+        db = mddb.MDDB(deck)
+        cid = db.conn.execute("SELECT id FROM entries").fetchone()[0]
+        with db.editor(rationale="annotate") as e:
+            card = e.read(cid)
+            for k, v in extra_yaml.items():
+                card.yaml[k] = v
+            e.update(card, summary=card.summary)
+    return deck
+
+
+def _month(deck):
+    return sorted(
+        events_in_window(
+            mddb.MDDB(deck),
+            dt.datetime(2026, 5, 1, tzinfo=UTC),
+            dt.datetime(2026, 6, 20, tzinfo=UTC),
+        ),
+        key=lambda o: o.start,
+    )
+
+
+def test_hide_occurrences_flags_only_those_instants(tmp_path):
+    deck = _weekly(tmp_path)
+    occ = _month(deck)
+    second = occ[1].start
+    db = mddb.MDDB(deck)
+    cid = db.conn.execute("SELECT id FROM entries").fetchone()[0]
+    with db.editor(rationale="hide one") as e:
+        card = e.read(cid)
+        card.yaml["hidden_occurrences"] = [int(second.timestamp())]
+        e.update(card, summary=card.summary)
+    occ = _month(deck)
+    assert [o.hidden for o in occ] == [False, True, False, False, False, False]
+
+
+def test_hidden_from_flags_the_ray(tmp_path):
+    deck = _weekly(tmp_path)
+    occ = _month(deck)
+    cutoff = int(occ[3].start.timestamp())
+    db = mddb.MDDB(deck)
+    cid = db.conn.execute("SELECT id FROM entries").fetchone()[0]
+    with db.editor(rationale="hide from") as e:
+        card = e.read(cid)
+        card.yaml["hidden_from"] = cutoff
+        e.update(card, summary=card.summary)
+    occ = _month(deck)
+    assert [o.hidden for o in occ] == [False, False, False, True, True, True]
+
+
+def test_series_tag_hides_all_including_exception_card(tmp_path):
+    ics = tmp_path / "s.ics"
+    ics.write_text(
+        "BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n"
+        "BEGIN:VEVENT\nUID:hide-2@example.com\nDTSTAMP:20260101T120000Z\n"
+        "DTSTART;TZID=Europe/London:20260504T130000\n"
+        "DTEND;TZID=Europe/London:20260504T133000\n"
+        "RRULE:FREQ=WEEKLY;COUNT=6;BYDAY=MO\nSEQUENCE:0\nSTATUS:CONFIRMED\n"
+        "SUMMARY:Seminar\nEND:VEVENT\n"
+        "BEGIN:VEVENT\nUID:hide-2@example.com\nDTSTAMP:20260101T120000Z\n"
+        "RECURRENCE-ID;TZID=Europe/London:20260511T130000\n"
+        "DTSTART;TZID=Europe/London:20260511T150000\n"
+        "DTEND;TZID=Europe/London:20260511T153000\n"
+        "SEQUENCE:1\nSTATUS:CONFIRMED\nSUMMARY:Seminar (moved)\nEND:VEVENT\n"
+        "END:VCALENDAR\n"
+    )
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "test")
+    db = mddb.MDDB(deck)
+    master = db.conn.execute(
+        "SELECT e.id FROM entries e JOIN entry_fields r ON r.entry_rowid=e.rowid "
+        "AND r.key='rrule'"
+    ).fetchone()[0]
+    with db.editor(rationale="hide series") as e:
+        card = e.read(master)
+        e.update(card, summary=card.summary, tags=["mdcal/hidden"])
+    occ = _month(deck)
+    assert occ and all(o.hidden for o in occ)
+    assert any(o.card.title == "Seminar (moved)" for o in occ)
+
+
+def test_hide_does_not_leak_across_sources(tmp_path):
+    body = (
+        "BEGIN:VEVENT\nUID:shared@example.com\nDTSTAMP:20260101T120000Z\n"
+        "DTSTART;TZID=Europe/London:20260504T130000\n"
+        "DTEND;TZID=Europe/London:20260504T133000\n"
+        "RRULE:FREQ=WEEKLY;COUNT=6;BYDAY=MO\nSEQUENCE:0\nSTATUS:CONFIRMED\n"
+        "SUMMARY:Shared\nEND:VEVENT\n"
+    )
+    cal = f"BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n{body}END:VCALENDAR\n"
+    ics = tmp_path / "s.ics"
+    ics.write_text(cal)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "alpha")
+    import_ics(deck, str(ics), "beta")
+    db = mddb.MDDB(deck)
+    alpha = db.conn.execute(
+        "SELECT e.id FROM entries e JOIN entry_fields s ON s.entry_rowid=e.rowid "
+        "AND s.key='source' AND s.value_str='alpha'"
+    ).fetchone()[0]
+    with db.editor(rationale="hide alpha series") as e:
+        card = e.read(alpha)
+        e.update(card, summary=card.summary, tags=["mdcal/hidden"])
+    occ = _month(deck)
+    by_source = {}
+    for o in occ:
+        by_source.setdefault(o.card.yaml["source"], []).append(o.hidden)
+    assert all(by_source["alpha"]) and not any(by_source["beta"])
+
+
+def test_exception_suppression_does_not_leak_across_sources(tmp_path):
+    master = (
+        "BEGIN:VEVENT\nUID:sup@example.com\nDTSTAMP:20260101T120000Z\n"
+        "DTSTART;TZID=Europe/London:20260504T130000\n"
+        "DTEND;TZID=Europe/London:20260504T133000\n"
+        "RRULE:FREQ=WEEKLY;COUNT=6;BYDAY=MO\nSEQUENCE:0\nSTATUS:CONFIRMED\n"
+        "SUMMARY:Shared\nEND:VEVENT\n"
+    )
+    exception = (
+        "BEGIN:VEVENT\nUID:sup@example.com\nDTSTAMP:20260101T120000Z\n"
+        "RECURRENCE-ID;TZID=Europe/London:20260511T130000\n"
+        "DTSTART;TZID=Europe/London:20260511T160000\n"
+        "DTEND;TZID=Europe/London:20260511T163000\n"
+        "SEQUENCE:1\nSTATUS:CONFIRMED\nSUMMARY:Moved\nEND:VEVENT\n"
+    )
+    deck = str(tmp_path / "deck")
+    (tmp_path / "a.ics").write_text(
+        f"BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n{master}{exception}END:VCALENDAR\n"
+    )
+    (tmp_path / "b.ics").write_text(
+        f"BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n{master}END:VCALENDAR\n"
+    )
+    import_ics(deck, str(tmp_path / "a.ics"), "alpha")
+    import_ics(deck, str(tmp_path / "b.ics"), "beta")
+    occ = events_in_window(
+        mddb.MDDB(deck),
+        dt.datetime(2026, 5, 11, tzinfo=UTC),
+        dt.datetime(2026, 5, 12, tzinfo=UTC),
+    )
+    # alpha: the 13:00 generated slot is suppressed, only the 16:00 exception shows.
+    alpha = sorted(o.start.hour for o in occ if o.card.yaml["source"] == "alpha")
+    beta = sorted(o.start.hour for o in occ if o.card.yaml["source"] == "beta")
+    assert alpha == [16]
+    assert beta == [13]
