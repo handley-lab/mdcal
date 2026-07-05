@@ -22,4 +22,6 @@ package() {
   install -dm755 "$pkgdir/usr/bin"
   printf '#!/usr/bin/env python\nfrom mdcal.ics import main\nmain()\n' > "$pkgdir/usr/bin/mdcal-import"
   chmod 755 "$pkgdir/usr/bin/mdcal-import"
+  printf '#!/usr/bin/env python\nfrom mdcal.gcal import main\nmain()\n' > "$pkgdir/usr/bin/mdcal-pull"
+  chmod 755 "$pkgdir/usr/bin/mdcal-pull"
 }

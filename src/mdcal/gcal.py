@@ -148,7 +148,10 @@ def export_ics(credentials, calendar_id):
     child resource, whereas the ICS export folds it into an ``EXDATE`` on the
     master. So cancelled children become master EXDATEs here (not cards),
     confirmed children become ``RECURRENCE-ID`` VEVENTs, and singles/masters
-    map straight across — yielding the same ``(uid, recurrence_id)`` set the
+    map straight across. Every other ``cancelled`` item is SKIPPED — Google
+    also serves skeletal tombstones (no ``iCalUID``, sometimes no parent
+    link) even with ``showDeleted=false``; the feed omits them too, and
+    omission from the identity set is exactly a prune — yielding the same ``(uid, recurrence_id)`` set the
     secret feed would, which is what keeps ``--prune`` safe on a source
     switched from URL to API.
 
@@ -201,9 +204,9 @@ def export_ics(credentials, calendar_id):
     cal.add("prodid", "-//mdcal//google-export//EN")
     cal.add("version", "2.0")
     for item in items:
-        parent = item.get("recurringEventId")
-        if parent and item["status"] == "cancelled":
+        if item["status"] == "cancelled":
             continue
+        parent = item.get("recurringEventId")
         master_zone = zone_of.get(item["id"]) or zone_of.get(parent) or default_tz
         cal.add_component(
             _item_to_vevent(item, excluded.get(item["id"], []), default_tz, master_zone)
@@ -254,6 +257,16 @@ def _item_to_vevent(item, excluded, default_tz, master_zone):
         vevent.add("LOCATION", item["location"])
     if item.get("description"):
         vevent.add("DESCRIPTION", item["description"])
+    conference = item.get("hangoutLink") or next(
+        (
+            entry["uri"]
+            for entry in item.get("conferenceData", {}).get("entryPoints", [])
+            if entry.get("entryPointType") == "video"
+        ),
+        None,
+    )
+    if conference:
+        vevent.add("X-GOOGLE-CONFERENCE", conference)
     if item.get("organizer", {}).get("email"):
         vevent.add("ORGANIZER", f"mailto:{item['organizer']['email']}")
     for attendee in item.get("attendees", []):

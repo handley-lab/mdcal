@@ -361,3 +361,16 @@ def test_export_ics_unknown_recurrence_line_crashes(monkeypatch):
     monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
     with pytest.raises(ValueError, match="unsupported recurrence line"):
         gcal.export_ics(None, "cal")
+
+
+def test_export_ics_skips_skeletal_cancelled_tombstones(monkeypatch):
+    import mdcal.gcal as gcal
+
+    live = _gitem("a@x", {"date": "2026-02-01"}, {"date": "2026-02-02"})
+    tombstone = {"id": "gone123", "status": "cancelled"}
+    fake = _FakeExportService(pages=[[live, tombstone]])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
+    vevents = list(
+        icalendar.Calendar.from_ical(gcal.export_ics(None, "cal")).walk("VEVENT")
+    )
+    assert [str(v["UID"]) for v in vevents] == ["a@x"]
