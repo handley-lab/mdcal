@@ -209,7 +209,9 @@ def export_ics(credentials, calendar_id):
         parent = item.get("recurringEventId")
         master_zone = zone_of.get(item["id"]) or zone_of.get(parent) or default_tz
         cal.add_component(
-            _item_to_vevent(item, excluded.get(item["id"], []), default_tz, master_zone)
+            _item_to_vevent(
+                item, excluded.get(item["id"], []), default_tz, master_zone, calendar_id
+            )
         )
     return cal.to_ical().decode()
 
@@ -229,7 +231,7 @@ def _gtime(gtime, tz):
     return _rfc3339(gtime["dateTime"]).astimezone(ZoneInfo(tz)), False
 
 
-def _item_to_vevent(item, excluded, default_tz, master_zone):
+def _item_to_vevent(item, excluded, default_tz, master_zone, calendar_id):
     vevent = icalendar.Event()
     vevent.add("UID", item["iCalUID"])
     vevent.add("DTSTAMP", _dt.datetime.now(_dt.timezone.utc))
@@ -274,6 +276,14 @@ def _item_to_vevent(item, excluded, default_tz, master_zone):
             vevent.add("ATTENDEE", f"mailto:{attendee['email']}")
     vevent.add("CREATED", _rfc3339(item["created"]))
     vevent.add("LAST-MODIFIED", _rfc3339(item["updated"]))
+    # Provenance back to the Google source: the event id, the calendar it came
+    # from (which `source: local` alone no longer records), and a click-back
+    # link. Carried as X- props so `vevent_to_card` can flatten them onto the
+    # card without inventing a private card format.
+    vevent.add("X-GOOGLE-EVENT-ID", item["id"])
+    vevent.add("X-GOOGLE-CALENDAR-ID", calendar_id)
+    if item.get("htmlLink"):
+        vevent.add("X-GOOGLE-HTML-LINK", item["htmlLink"])
     return vevent
 
 
