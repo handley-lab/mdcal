@@ -9,6 +9,7 @@ only through the public `mddb.MDDB` API and raw SQL over `db.conn`.
 import argparse
 import collections
 import datetime as _dt
+from zoneinfo import ZoneInfo
 import hashlib
 import re
 from dataclasses import dataclass
@@ -133,7 +134,7 @@ def normalise_until(rrule):
     return re.sub(r"UNTIL=([0-9]{8})(?=;|$)", r"UNTIL=\1T235959Z", rrule)
 
 
-def _recurrence_end_epoch(rrule, dtstart, dtend, all_day, rdates=()):
+def _recurrence_end_epoch(rrule, dtstart, dtend, all_day, tzid, rdates=()):
     """Epoch of a master's final generated occurrence end (its query bound).
 
     The resolver prefilters masters to ``recurrence_end_epoch > window_start``,
@@ -156,7 +157,7 @@ def _recurrence_end_epoch(rrule, dtstart, dtend, all_day, rdates=()):
     anchor = (
         _dt.datetime(dtstart.year, dtstart.month, dtstart.day, tzinfo=_dt.timezone.utc)
         if all_day
-        else dtstart
+        else dtstart.astimezone(ZoneInfo(tzid))
     )
     instances = list(rrulestr(normalise_until(rrule), dtstart=anchor))
     rule_bound = (
@@ -285,6 +286,7 @@ def vevent_to_card(vevent, source):
             dtstart,
             dtend,
             all_day,
+            tzid,
             _rdates(vevent, uid),
         )
         if vevent.get("RRULE")

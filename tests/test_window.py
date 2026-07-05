@@ -509,3 +509,61 @@ def test_rdate_duplicate_of_generated_instance_not_doubled(tmp_path):
         dt.datetime(2026, 1, 13, tzinfo=UTC),
     )
     assert len(occ) == 1
+
+
+def _winter_anchored_oslo(tmp_path):
+    ics = tmp_path / "dst.ics"
+    ics.write_text(
+        "BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n"
+        "BEGIN:VEVENT\n"
+        "UID:dst-1@example.com\n"
+        "DTSTAMP:20260101T120000Z\n"
+        "DTSTART;TZID=Europe/Oslo:20231227T080000\n"
+        "DTEND;TZID=Europe/Oslo:20231227T090000\n"
+        "RRULE:FREQ=WEEKLY;INTERVAL=4;BYDAY=WE;WKST=MO\n"
+        "SEQUENCE:0\nSTATUS:CONFIRMED\nSUMMARY:DST series\n"
+        "END:VEVENT\nEND:VCALENDAR\n"
+    )
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "test")
+    return deck
+
+
+def test_recurrence_follows_dst_not_anchor_offset(tmp_path):
+    deck = _winter_anchored_oslo(tmp_path)
+    (july,) = events_in_window(
+        mddb.MDDB(deck),
+        dt.datetime(2026, 7, 6, tzinfo=UTC),
+        dt.datetime(2026, 7, 13, tzinfo=UTC),
+    )
+    assert july.start.astimezone(UTC) == dt.datetime(2026, 7, 8, 6, 0, tzinfo=UTC)
+    (jan,) = events_in_window(
+        mddb.MDDB(deck),
+        dt.datetime(2027, 1, 18, tzinfo=UTC),
+        dt.datetime(2027, 1, 25, tzinfo=UTC),
+    )
+    assert jan.start.astimezone(UTC) == dt.datetime(2027, 1, 20, 7, 0, tzinfo=UTC)
+
+
+def test_exdate_suppresses_across_dst(tmp_path):
+    ics = tmp_path / "dst2.ics"
+    ics.write_text(
+        "BEGIN:VCALENDAR\nPRODID:-//t//EN\nVERSION:2.0\n"
+        "BEGIN:VEVENT\n"
+        "UID:dst-2@example.com\n"
+        "DTSTAMP:20260101T120000Z\n"
+        "DTSTART;TZID=Europe/Oslo:20251203T080000\n"
+        "DTEND;TZID=Europe/Oslo:20251203T090000\n"
+        "RRULE:FREQ=WEEKLY;INTERVAL=4;BYDAY=WE;WKST=MO\n"
+        "EXDATE;TZID=Europe/Oslo:20260708T080000\n"
+        "SEQUENCE:0\nSTATUS:CONFIRMED\nSUMMARY:DST exdate\n"
+        "END:VEVENT\nEND:VCALENDAR\n"
+    )
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "test")
+    occ = events_in_window(
+        mddb.MDDB(deck),
+        dt.datetime(2026, 7, 6, tzinfo=UTC),
+        dt.datetime(2026, 7, 13, tzinfo=UTC),
+    )
+    assert occ == []

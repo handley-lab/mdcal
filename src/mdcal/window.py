@@ -11,6 +11,7 @@ substrate stays calendar-agnostic.
 
 import datetime as _dt
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 import yaml as _yaml
 from dateutil.rrule import rrulestr
@@ -164,7 +165,7 @@ def _expand_master(card, start, end, start_epoch, end_epoch, suppression):
     anchor = (
         _dt.datetime(dtstart.year, dtstart.month, dtstart.day, tzinfo=_dt.timezone.utc)
         if all_day
-        else dtstart
+        else dtstart.astimezone(ZoneInfo(card.yaml["tzid"]))
     )
     rule = rrulestr(normalise_until(card.yaml["rrule"]), dtstart=anchor)
     suppress = {_instant(d) for d in card.yaml.get("exdate", [])}
