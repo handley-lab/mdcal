@@ -9,6 +9,7 @@ only through the public `mddb.MDDB` API and raw SQL over `db.conn`.
 import argparse
 import collections
 import datetime as _dt
+from zoneinfo import ZoneInfo
 import hashlib
 import re
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ EVENT_KEYS = (
     "rrule",
     "recurrence_end_epoch",
     "exdate",
+    "rdate",
     "location",
     "organizer",
     "attendee_emails",
@@ -50,6 +52,11 @@ The shared write contract: any writer that re-renders a card (a re-import, a
 web edit) strips exactly these keys from the existing YAML before applying a
 fresh render, so fields the source dropped don't linger while non-owned local
 keys survive.
+
+``tags`` is deliberately NOT here: iCal ``CATEGORIES`` seed a card's tags at
+creation, after which tags are deck-owned local classification — no re-render
+path may pass ``tags=`` to ``editor.update``, so retags (``area/*``,
+``mdcal/hidden``) survive every upstream change.
 """
 
 GRACE = _dt.timedelta(hours=1)
@@ -127,7 +134,7 @@ def normalise_until(rrule):
     return re.sub(r"UNTIL=([0-9]{8})(?=;|$)", r"UNTIL=\1T235959Z", rrule)
 
 
-def _recurrence_end_epoch(rrule, dtstart, dtend, all_day):
+def _recurrence_end_epoch(rrule, dtstart, dtend, all_day, tzid, rdates=()):
     """Epoch of a master's final generated occurrence end (its query bound).
 
     The resolver prefilters masters to ``recurrence_end_epoch > window_start``,
@@ -140,19 +147,26 @@ def _recurrence_end_epoch(rrule, dtstart, dtend, all_day):
     `RECURRENCE_FOREVER_EPOCH`. A finite rule generating ZERO instances is
     real upstream data (Google serves a GAMBIT master whose UNTIL falls the
     day before its DTSTART); such a master expands to nothing, so its bound
-    is its own ``dtstart``.
+    is its own ``dtstart``. RDATEs extend a bounded rule (a series prolonged
+    by explicit dates after its UNTIL), so the bound covers the last RDATE's
+    occurrence end too.
     """
     if "COUNT=" not in rrule and "UNTIL=" not in rrule:
         return RECURRENCE_FOREVER_EPOCH
+    rdate_bound = max((_epoch(r) for r in rdates), default=None)
     anchor = (
         _dt.datetime(dtstart.year, dtstart.month, dtstart.day, tzinfo=_dt.timezone.utc)
         if all_day
-        else dtstart
+        else dtstart.astimezone(ZoneInfo(tzid))
     )
     instances = list(rrulestr(normalise_until(rrule), dtstart=anchor))
-    if not instances:
-        return _epoch(dtstart)
-    return _epoch(instances[-1] + (dtend - dtstart))
+    rule_bound = (
+        _epoch(instances[-1] + (dtend - dtstart)) if instances else _epoch(dtstart)
+    )
+    duration = int((dtend - dtstart).total_seconds())
+    if rdate_bound is not None:
+        return max(rule_bound, rdate_bound + duration)
+    return rule_bound
 
 
 def _epoch(value):
@@ -184,7 +198,15 @@ def _point(prop, uid):
 
 
 def _exdates(vevent, uid):
-    raw = vevent.get("EXDATE")
+    return _date_list(vevent, "EXDATE", uid)
+
+
+def _rdates(vevent, uid):
+    return _date_list(vevent, "RDATE", uid)
+
+
+def _date_list(vevent, key, uid):
+    raw = vevent.get(key)
     if raw is None:
         return []
     groups = raw if isinstance(raw, list) else [raw]
@@ -260,11 +282,17 @@ def vevent_to_card(vevent, source):
         else None,
         "rrule": vevent["RRULE"].to_ical().decode() if vevent.get("RRULE") else None,
         "recurrence_end_epoch": _recurrence_end_epoch(
-            vevent["RRULE"].to_ical().decode(), dtstart, dtend, all_day
+            vevent["RRULE"].to_ical().decode(),
+            dtstart,
+            dtend,
+            all_day,
+            tzid,
+            _rdates(vevent, uid),
         )
         if vevent.get("RRULE")
         else None,
         "exdate": _exdates(vevent, uid) or None,
+        "rdate": _rdates(vevent, uid) or None,
         "location": str(vevent["LOCATION"]) if vevent.get("LOCATION") else None,
         "organizer": _email(vevent["ORGANIZER"]) if vevent.get("ORGANIZER") else None,
         "attendee_emails": _attendees(vevent) or None,
@@ -401,24 +429,33 @@ def _guarded(card, existing):
     return card.yaml["last_modified"] < dispatched
 
 
+def _seeded_tags(card_tags, seed_tags):
+    """Ordered duplicate-free union of a new card's CATEGORIES and seed tags."""
+    return list(dict.fromkeys([*card_tags, *seed_tags]))
+
+
 def _unchanged(card, existing):
     existing_importer = {k: v for k, v in existing.yaml.items() if k in EVENT_KEYS}
     return (
         card.title == existing.title
         and card.summary == existing.summary
         and card.body == existing.body
-        and card.tags == existing.yaml.get("tags", [])
         and card.yaml == existing_importer
     )
 
 
-def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
+def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=()):
     """Idempotently import an `.ics` calendar into the mddb deck at `deck`.
 
     Opens (or initialises) the deck, renders one card per VEVENT, and within a
     per-year `db.editor` block creates new cards, updates changed ones, and skips
     unchanged ones — keyed on ``source + uid + recurrence_id``. A year with no
     creates/updates opens no editor block, so a clean re-import produces no commit.
+
+    Tags are deck-owned after creation: a new card's tags are seeded once
+    (feed ``CATEGORIES`` first, then ``tags`` values not already present) and
+    updates never touch them, so local classification (``area/*``,
+    ``mdcal/hidden``) survives every upstream change.
 
     Args:
         deck: Path to the deck (created via `mddb.MDDB.init` if absent).
@@ -431,6 +468,7 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
             span, where an absent event means an upstream deletion. Cards of
             other sources (``local``, …) are never touched; git history is the
             tombstone. Nothing to prune opens no editor block.
+        tags: Seed tags applied to CREATED cards only.
 
     Returns:
         A ``{"created": int, "updated": int, "skipped": int, "pruned": int}``
@@ -473,10 +511,11 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
         with db.editor(rationale=f"import {source} {year}") as editor:
             for card, cid in actions:
                 if cid is None:
+                    seeded = _seeded_tags(card.tags, tags)
                     editor.create(
                         title=card.title,
                         summary=card.summary,
-                        tags=card.tags or None,
+                        tags=seeded or None,
                         body=card.body,
                         relpath=card.relpath,
                         yaml=card.yaml,
@@ -493,9 +532,7 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False):
                     kept.update(card.yaml)
                     existing_card.yaml = kept
                     existing_card.body = card.body
-                    editor.update(
-                        existing_card, summary=card.summary, tags=card.tags or ()
-                    )
+                    editor.update(existing_card, summary=card.summary)
                     year_updated += 1
         counts["created"] += year_created
         counts["updated"] += year_updated
@@ -541,18 +578,25 @@ def main(argv=None):
     parser.add_argument("--limit", type=int)
     parser.add_argument("--uid")
     parser.add_argument("--prune", action="store_true")
+    parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="seed tag applied to created cards only (repeatable)",
+    )
     args = parser.parse_args(argv)
 
     if args.dry_run:
         for vevent in _vevents(args.ics, args.uid, args.limit):
             card = vevent_to_card(vevent, args.source)
+            card.tags = _seeded_tags(card.tags, args.tag)
             print(f"# ===== {card.relpath} =====")
             print(render_text(card))
         return
     if not args.deck:
         parser.error("--deck is required unless --dry-run")
     counts = import_ics(
-        args.deck, args.ics, args.source, args.uid, args.limit, args.prune
+        args.deck, args.ics, args.source, args.uid, args.limit, args.prune, args.tag
     )
     print(
         f"created={counts['created']} updated={counts['updated']} "

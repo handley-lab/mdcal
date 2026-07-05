@@ -27,10 +27,11 @@ primitives. Design choices must not paint that arc into a corner.
 - **Decks** — the calendar data. Each deck is its **own private GitHub repo**, living in neither
   app repo, cloned to a local path chosen by the *deployment* (the mdcal library takes the deck path
   as an argument and implies no privileged location; Alan's deployment uses `/var/lib/mdcal/<deck>`,
-  FHS-correct application state mirroring `/var/lib/alan-loop`). The grid app
-  overlays multiple decks and toggles each (work / home / polychord / subscribed) like Google's
-  left-hand calendar list. Multiple calendars = separate decks unified in one view, *not* a field
-  within one deck.
+  FHS-correct application state mirroring `/var/lib/alan-loop`). **Deck = audience;
+  calendar = per-card `source`.** A deck holds many sources — two calendars share a deck
+  exactly when their sharing circle is identical. The grid overlays decks and slices by
+  *tags*; `source` is sync/provenance plumbing (import identity, prune scope, write-back
+  routing), not a UI concept.
 
 ## Event model
 
@@ -40,7 +41,7 @@ primitives. Design choices must not paint that arc into a corner.
 |---|---|---|
 | `SUMMARY` (short title) | `title` | NB: iCal `SUMMARY` ≠ mddb `summary` |
 | `DESCRIPTION` | `body` | human notes / original description |
-| `CATEGORIES` | `tags` | |
+| `CATEGORIES` | `tags` | seeds at card creation ONLY — see below |
 | — | `summary` | mddb's mandatory disclosure one-liner; mdcal must supply a real value |
 
 Everything else is **flat layer YAML** modelled on VEVENT defaults, indexed by mddb's
@@ -55,6 +56,13 @@ external feeds) so import bugs are fixable without re-exporting. Byte-original
 preservation and full VTIMEZONE/semantic re-export fidelity are deferred (an importer that needs
 faithful outbound re-serialisation would split the source `.ics` into original VEVENT byte spans).
 
+**Tags are deck-owned after creation.** Inbound `CATEGORIES` (plus any per-feed seed tags)
+populate `tags` when a card is CREATED; no re-render path — importer update, web edit,
+cancel — ever passes `tags=` again, so local classification (`area/*`, `mdcal/hidden`)
+survives every upstream change. Outbound is symmetric: Google write-back builds its event
+body from uid/title/sequence/times/location/description/recurrence only — it never sends
+tags/`CATEGORIES` — so retagging never touches Google.
+
 **`uid` (iCal) is a layer field, distinct from mddb `id`** (a substrate-owned UUIDv4). Imported and
 subscribed events carry an upstream `uid` preserved for sync-by-uid. mddb does **not** enforce `uid`
 uniqueness — dedup is mdcal's job (SQL lookup before create/update). The same `uid` in two
@@ -64,10 +72,13 @@ calendars is **not** auto-collapsed into one card; cross-calendar coalescing, if
 ## Recurrence and overlays — one pattern: base + overlay, resolved at read time
 
 A recurring event is **one master card** holding the rule, not N materialised instances. The master
-carries `rrule` + `exdate` (a flat date list, top-level/indexed) + an `overrides` block keyed by
+carries `rrule` + `exdate` + `rdate` (flat date lists, top-level/indexed; RDATEs add explicit
+occurrences beyond the rule — real series were prolonged past their UNTIL that way, and the
+master's `recurrence_end_epoch` bound covers the last RDATE) + an `overrides` block keyed by
 `recurrence_id` (each: moved time / new title / `cancelled`).
 
-**Read-time resolution** (per visible window): expand the master's `rrule` → drop `exdate`s → for
+**Read-time resolution** (per visible window): expand the master's `rrule` → union `rdate`s
+(deduplicated against generated instants) → drop `exdate`s → for
 each `recurrence_id`, suppress the generated instance (its exception card renders concretely at its own
 time). Implemented in `mdcal/window.py` (`events_in_window`). **Conclusion: read-time expansion is the
 model; no materialised instance cache.** Performance (measured on the live 442-master Research deck):
@@ -107,8 +118,12 @@ ordinary flat importer cards keyed `source + uid + recurrence_id`, with **prune-
 deleted, git history serving as the tombstone. Prune is only sound against a feed serving the
 calendar's **full historical span** — verified per feed before it ships (both Google URL
 flavours checked live: spans back to the oldest events, counts matching the deck). The layer
-invariant makes prune lossless: web/local edits are forbidden on feed-sourced cards
-(`source != local` is read-only), so pruned cards carry nothing local. `--prune` refuses
+invariant keeps prune nearly lossless: event CONTENT is read-only on feed-sourced cards
+(`source != local`), with one narrow exception — non-owned **tag annotations**
+(`mdcal/hidden`, `area/*`) are writable, survive re-render because tags are deck-owned
+after creation, and do NOT survive upstream deletion (prune takes the card, tags included;
+the base+overlay/tombstone slice below stays deferred for annotations that must outlive
+upstream deletion). `--prune` refuses
 `--uid`/`--limit` — a partial import's identity set would mass-delete the unselected remainder.
 
 Google's ICS endpoints send **no ETag / no Last-Modified** (`cache-control: no-store`), so
@@ -121,8 +136,10 @@ the fenced VEVENT — with these semantics it is serialisation metadata, not eve
 flat yaml's `created`/`last_modified` come from the stable CREATED/LAST-MODIFIED). Hourly
 polling ships only after a captured re-fetch pair imports as create-then-no-op. Feed URLs come in two
 flavours: *public* (`…/ical/<id>/public/basic.ics`) and per-user *secret*
-(`…/ical/<id>/private-<token>/basic.ics`) for private calendars — the secret token is a
-committed credential of the private deployment repo.
+(`…/ical/<id>/private-<token>/basic.ics`). Secret URLs are NOT used for calendars we hold the
+OAuth credential to — owned calendars pull via `mdcal-pull` (§Sync pipe 2), so no per-calendar
+secret read token is harvested or committed; a URL feed line is only for genuinely external
+sources (public calendars, third-party `.ics`).
 
 **Deferred to the overlay slice** (needed once feed events take local annotations): the
 base+overlay split — a **base** section the fetcher overwrites each pull, an **adjustments**
@@ -143,7 +160,19 @@ overlays land. `STATUS:CANCELLED` already stays as a card (the resolver hides it
    `conflict_rationales()`. The conflict scanner must work at git/filesystem level, because invalid
    YAML makes `db.read`/rebuild raise *before* the grid can query.
 2. **Feed = ICS pull inbound; for *synced* sources, Google API write-through outbound.** Inbound
-   stays `curl` + the `mdcal-import` CLI on a timer. A source marked *synced* (a `calendar_id`
+   is `curl` + the `mdcal-import` CLI on a timer for EXTERNAL feeds; for calendars we hold the
+   OAuth credential to (Will-owned), `mdcal-pull` replaces `curl`: it API-exports the calendar
+   (`events.list`, `singleEvents=false`, full-span, paginated to exhaustion — a failed page
+   raises before any output, so `--prune` never sees a partial identity set) and synthesizes the
+   same VCALENDAR shape the secret feed serves. Verified byte-equivalent for import identity on
+   the research calendar (3,880/3,880 `(uid, recurrence_id)` match): cancelled recurring
+   instances — API-served as `status: cancelled` child resources — fold into master `EXDATE`s
+   exactly as Google's own ICS export does, and `RECURRENCE-ID`/`EXDATE` serialize in the
+   MASTER's zone (exceptions can carry a different `originalStartTime.timeZone`; the feed uses
+   the series' zone, and mddb's identity is the serialized string). This is a VEVENT SUBSET
+   synthesized from the API event resource — no VTIMEZONE blocks or X- props; raw ICS stays the
+   fidelity reference for external URL feeds. No secret iCal URLs exist for owned calendars: one
+   OAuth credential replaces N per-calendar read tokens. A source marked *synced* (a `calendar_id`
    column in the deployment's feeds config) is additionally **writable through the Google
    Calendar API, synchronously in-request**: `events.import` carrying the card's own iCalUID
    (measured: import upserts — same Google id on re-import, content updated; stale `SEQUENCE`
@@ -187,15 +216,19 @@ wait for the substrate (both reviewers converged on this independently):
 
 ## Import / migration
 
-Source = the Google Calendar **`.ics` export** (verified faithful: carries `UID`, `ORGANIZER`,
-`STATUS`, `SEQUENCE`, `TRANSP`, `RRULE`, `RECURRENCE-ID`, `EXDATE` — all of which the Google API and
-its MCP drop; the API also returns expanded instances, not masters). The `.ics` *is* RFC 5545, so it
+Source = a Google Calendar **`.ics` document** — either the raw `.ics` export/feed (external
+URL feeds; the historical migration export), or, for owned calendars, the VCALENDAR that
+`mdcal-pull` synthesizes from the API (`events.list` with `singleEvents=false` returns masters
+plus `RECURRENCE-ID` exception resources — the early note that "the API returns expanded
+instances, not masters" described the default `singleEvents=true` mode and the MCP wrapper,
+not the API's capability; see §Sync pipe 2 for what the synthesis preserves and drops). Either
+way the importer consumes RFC 5545, so it
 maps ~1:1 onto VEVENT-shaped cards with least translation. Import parses with `icalendar` (an mdcal
 dep, never mddb); the importer only re-serialises the `RRULE` string, while **read-time recurrence
 expansion** (`mdcal/window.py`, `events_in_window`) uses `python-dateutil` to expand masters over a
 view window. Each upstream `RECURRENCE-ID` component
 is written as **its own card** keyed `uid+recurrence_id` (a Google export's overrides are
-content-bearing by construction); masters keep `rrule+exdate`; read-time resolution suppresses a
+content-bearing by construction); masters keep `rrule+exdate+rdate`; read-time resolution suppresses a
 master-generated instance when an exception card with that `uid+recurrence_id` exists. Import is
 **idempotent** on `source_calendar + uid + recurrence_id`. Archival calendars (no events after 2024)
 import once and sit read-only.

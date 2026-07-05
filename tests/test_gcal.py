@@ -172,3 +172,205 @@ def test_event_body_requires_sequence():
 def test_watermark_rejects_naive():
     with pytest.raises(ValueError, match="naive"):
         _watermark("2026-07-04T00:39:19")
+
+
+class _FakeExportService:
+    """The calendars()+events() surface export_ics touches, with paging."""
+
+    def __init__(self, pages, timezone="Europe/London", fail_on_page=None):
+        self.pages = pages
+        self.timezone = timezone
+        self.fail_on_page = fail_on_page
+        self.calls = 0
+
+    def calendars(self):
+        return self
+
+    def get(self, calendarId):
+        return _Result({"timeZone": self.timezone})
+
+    def events(self):
+        return self
+
+    def list(self, calendarId, singleEvents, showDeleted, maxResults, pageToken):
+        assert singleEvents is False and showDeleted is False
+        index = int(pageToken or 0)
+        if self.fail_on_page == index:
+            raise OSError("page fetch failed")
+        self.calls += 1
+        page = {"items": self.pages[index]}
+        if index + 1 < len(self.pages):
+            page["nextPageToken"] = str(index + 1)
+        return _Result(page)
+
+
+def _gitem(uid, start, end, **extra):
+    return {
+        "id": extra.pop("gid", uid.split("@")[0]),
+        "iCalUID": uid,
+        "status": extra.pop("status", "confirmed"),
+        "summary": extra.pop("summary", "Event"),
+        "created": "2026-01-01T00:00:00Z",
+        "updated": "2026-01-02T00:00:00.500Z",
+        "start": start,
+        "end": end,
+        **extra,
+    }
+
+
+def _timed(iso, tz=None):
+    point = {"dateTime": iso}
+    if tz:
+        point["timeZone"] = tz
+    return point
+
+
+def test_export_ics_stitches_pages_and_folds_cancelled(monkeypatch):
+    import mdcal.gcal as gcal
+
+    master = _gitem(
+        "series@x",
+        _timed("2026-01-05T10:00:00Z", "Europe/London"),
+        _timed("2026-01-05T11:00:00Z", "Europe/London"),
+        gid="m1",
+        recurrence=["RRULE:FREQ=WEEKLY;COUNT=6"],
+    )
+    kept = _gitem(
+        "series@x",
+        _timed("2026-01-12T14:00:00Z", "UTC"),
+        _timed("2026-01-12T15:00:00Z", "UTC"),
+        gid="e1",
+        recurringEventId="m1",
+        originalStartTime=_timed("2026-01-12T10:00:00Z", "UTC"),
+    )
+    cancelled = _gitem(
+        "series@x",
+        _timed("2026-01-19T10:00:00Z", "UTC"),
+        _timed("2026-01-19T11:00:00Z", "UTC"),
+        gid="e2",
+        status="cancelled",
+        recurringEventId="m1",
+        originalStartTime=_timed("2026-01-19T10:00:00Z", "UTC"),
+    )
+    single = _gitem(
+        "single@x",
+        {"date": "2026-02-01"},
+        {"date": "2026-02-02"},
+    )
+    fake = _FakeExportService(pages=[[master, kept], [cancelled, single]])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
+    out = icalendar.Calendar.from_ical(gcal.export_ics(None, "cal"))
+    vevents = list(out.walk("VEVENT"))
+    assert fake.calls == 2
+    assert len(vevents) == 3
+    m = [v for v in vevents if v.get("RRULE")][0]
+    ex = m["EXDATE"]
+    groups = ex if isinstance(ex, list) else [ex]
+    (excluded,) = [d.dt for g in groups for d in g.dts]
+    assert excluded.tzname() is not None
+    assert str(excluded.tzinfo) == "Europe/London"
+    assert excluded.hour == 10
+    exc = [v for v in vevents if v.get("RECURRENCE-ID")][0]
+    rid = exc["RECURRENCE-ID"].dt
+    assert str(rid.tzinfo) == "Europe/London"
+    assert rid.hour == 10
+    allday = [v for v in vevents if str(v["UID"]) == "single@x"][0]
+    assert allday["DTSTART"].dt == dt.date(2026, 2, 1)
+
+
+def test_export_ics_partial_page_failure_crashes(monkeypatch):
+    import mdcal.gcal as gcal
+
+    single = _gitem("a@x", {"date": "2026-02-01"}, {"date": "2026-02-02"})
+    fake = _FakeExportService(pages=[[single], [single]], fail_on_page=1)
+    monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
+    with pytest.raises(OSError, match="page fetch failed"):
+        gcal.export_ics(None, "cal")
+
+
+def test_export_ics_round_trips_through_import(monkeypatch, tmp_path):
+    import mdcal.gcal as gcal
+    from mdcal.ics import import_ics
+
+    master = _gitem(
+        "series@x",
+        _timed("2026-01-05T10:00:00Z", "Europe/London"),
+        _timed("2026-01-05T11:00:00Z", "Europe/London"),
+        gid="m1",
+        recurrence=["RRULE:FREQ=WEEKLY;COUNT=6"],
+    )
+    exception = _gitem(
+        "series@x",
+        _timed("2026-01-12T14:00:00Z", "UTC"),
+        _timed("2026-01-12T15:00:00Z", "UTC"),
+        gid="e1",
+        recurringEventId="m1",
+        originalStartTime=_timed("2026-01-12T10:00:00Z", "UTC"),
+    )
+    fake = _FakeExportService(pages=[[master, exception]])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
+    ics = tmp_path / "owned.ics"
+    ics.write_text(gcal.export_ics(None, "cal"))
+    deck = str(tmp_path / "deck")
+    counts = import_ics(deck, str(ics), "owned", tags=["area/work"])
+    assert counts == {"created": 2, "updated": 0, "skipped": 0, "pruned": 0}
+    again = import_ics(deck, str(ics), "owned", tags=["area/work"])
+    assert again["skipped"] == 2 and again["created"] == 0
+
+
+def test_export_ics_recurrence_exdate_rdate_lines(monkeypatch, tmp_path):
+    import mdcal.gcal as gcal
+
+    master = _gitem(
+        "series@x",
+        _timed("2026-01-05T10:00:00Z", "Europe/London"),
+        _timed("2026-01-05T11:00:00Z", "Europe/London"),
+        gid="m1",
+        recurrence=[
+            "RRULE:FREQ=WEEKLY;COUNT=6",
+            "EXDATE;TZID=Europe/London:20260119T100000",
+            "RDATE;VALUE=DATE:20260301",
+        ],
+    )
+    fake = _FakeExportService(pages=[[master]])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
+    (vevent,) = icalendar.Calendar.from_ical(gcal.export_ics(None, "cal")).walk(
+        "VEVENT"
+    )
+    ex = vevent["EXDATE"]
+    groups = ex if isinstance(ex, list) else [ex]
+    (excluded,) = [d.dt for g in groups for d in g.dts]
+    assert str(excluded.tzinfo) == "Europe/London" and excluded.hour == 10
+    rd = vevent["RDATE"]
+    groups = rd if isinstance(rd, list) else [rd]
+    (added,) = [d.dt for g in groups for d in g.dts]
+    assert added == dt.date(2026, 3, 1)
+
+
+def test_export_ics_unknown_recurrence_line_crashes(monkeypatch):
+    import mdcal.gcal as gcal
+
+    master = _gitem(
+        "series@x",
+        _timed("2026-01-05T10:00:00Z", "Europe/London"),
+        _timed("2026-01-05T11:00:00Z", "Europe/London"),
+        gid="m1",
+        recurrence=["EXRULE:FREQ=WEEKLY"],
+    )
+    fake = _FakeExportService(pages=[[master]])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
+    with pytest.raises(ValueError, match="unsupported recurrence line"):
+        gcal.export_ics(None, "cal")
+
+
+def test_export_ics_skips_skeletal_cancelled_tombstones(monkeypatch):
+    import mdcal.gcal as gcal
+
+    live = _gitem("a@x", {"date": "2026-02-01"}, {"date": "2026-02-02"})
+    tombstone = {"id": "gone123", "status": "cancelled"}
+    fake = _FakeExportService(pages=[[live, tombstone]])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
+    vevents = list(
+        icalendar.Calendar.from_ical(gcal.export_ics(None, "cal")).walk("VEVENT")
+    )
+    assert [str(v["UID"]) for v in vevents] == ["a@x"]

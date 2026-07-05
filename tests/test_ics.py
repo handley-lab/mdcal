@@ -249,6 +249,93 @@ def test_import_preserves_local_key_and_still_skips(ics_sample, tmp_path):
     assert mddb.MDDB(deck).head() == head
 
 
+def test_local_retag_survives_clean_reimport_as_skip(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    db = mddb.MDDB(deck)
+    cid = db.conn.execute(
+        "SELECT e.id FROM entries e JOIN entry_fields f ON f.entry_rowid=e.rowid "
+        "WHERE f.key='uid' AND f.value_str='plain-1@example.com'"
+    ).fetchone()[0]
+    with db.editor(rationale="hide from the grid") as e:
+        card = e.read(cid)
+        e.update(card, summary=card.summary, tags=["mdcal/hidden", "area/research"])
+    head = mddb.MDDB(deck).head()
+    counts = import_ics(deck, str(ics), "research")
+    assert counts["updated"] == 0 and counts["skipped"] == 4
+    assert mddb.MDDB(deck).head() == head
+
+
+def test_local_retag_survives_upstream_update(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    db = mddb.MDDB(deck)
+    cid = db.conn.execute(
+        "SELECT e.id FROM entries e JOIN entry_fields f ON f.entry_rowid=e.rowid "
+        "WHERE f.key='uid' AND f.value_str='plain-1@example.com'"
+    ).fetchone()[0]
+    with db.editor(rationale="hide from the grid") as e:
+        card = e.read(cid)
+        e.update(card, summary=card.summary, tags=["mdcal/hidden"])
+    ics.write_text(ics_sample.replace("Plain meeting", "Plain meeting EDITED"))
+    counts = import_ics(deck, str(ics), "research")
+    assert counts["updated"] == 1
+    updated = mddb.MDDB(deck).read(cid)
+    assert updated.title == "Plain meeting EDITED"
+    assert updated.yaml["tags"] == ["mdcal/hidden"]
+
+
+def test_seed_tags_created_only_and_deduped(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    counts = import_ics(deck, str(ics), "research", tags=["area/research"])
+    assert counts["created"] == 4
+    db = mddb.MDDB(deck)
+    tagged = db.conn.execute(
+        "SELECT COUNT(*) FROM entry_fields WHERE key='tags' "
+        "AND value_str='area/research'"
+    ).fetchone()[0]
+    assert tagged == 4
+    cid = db.conn.execute(
+        "SELECT e.id FROM entries e JOIN entry_fields f ON f.entry_rowid=e.rowid "
+        "WHERE f.key='uid' AND f.value_str='plain-1@example.com'"
+    ).fetchone()[0]
+    with db.editor(rationale="reclassify") as e:
+        card = e.read(cid)
+        e.update(card, summary=card.summary, tags=["area/work"])
+    ics.write_text(ics_sample.replace("Plain meeting", "Plain meeting EDITED"))
+    import_ics(deck, str(ics), "research", tags=["area/research"])
+    assert mddb.MDDB(deck).read(cid).yaml["tags"] == ["area/work"]
+
+
+def test_seed_tags_union_is_duplicate_free(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(
+        ics_sample.replace(
+            "UID:plain-1@example.com\n",
+            "UID:plain-1@example.com\nCATEGORIES:area/research,area/research\n",
+        )
+    )
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research", tags=["area/research", "area/research"])
+    tags = (
+        mddb.MDDB(deck)
+        .conn.execute(
+            "SELECT f.value_str FROM entry_fields f "
+            "JOIN entry_fields u ON u.entry_rowid=f.entry_rowid "
+            "WHERE f.key='tags' AND u.key='uid' "
+            "AND u.value_str='plain-1@example.com'"
+        )
+        .fetchall()
+    )
+    assert tags == [("area/research",)]
+
+
 def test_import_drops_stale_field(ics_sample, tmp_path):
     ics = tmp_path / "research.ics"
     ics.write_text(ics_sample)

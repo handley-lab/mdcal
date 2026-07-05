@@ -1,6 +1,6 @@
 """Resolve an mddb calendar deck into the event occurrences within a time window.
 
-Recurring masters carry an ``rrule``+``exdate`` and are expanded at read time
+Recurring masters carry ``rrule``+``exdate``+``rdate`` and are expanded at read time
 (plain instances are never materialised); RECURRENCE-ID exceptions are their own
 cards keyed ``uid``+``recurrence_id``. `events_in_window` returns the occurrences
 overlapping a half-open window — expanding masters, subtracting EXDATEs, and
@@ -11,6 +11,7 @@ substrate stays calendar-agnostic.
 
 import datetime as _dt
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 import yaml as _yaml
 from dateutil.rrule import rrulestr
@@ -164,18 +165,25 @@ def _expand_master(card, start, end, start_epoch, end_epoch, suppression):
     anchor = (
         _dt.datetime(dtstart.year, dtstart.month, dtstart.day, tzinfo=_dt.timezone.utc)
         if all_day
-        else dtstart
+        else dtstart.astimezone(ZoneInfo(card.yaml["tzid"]))
     )
     rule = rrulestr(normalise_until(card.yaml["rrule"]), dtstart=anchor)
     suppress = {_instant(d) for d in card.yaml.get("exdate", [])}
     suppress |= suppression.get(card.yaml["uid"], set())
     out = []
-    for occ in rule.between(start - duration, end, inc=False):
+    seen = set()
+    generated = list(rule.between(start - duration, end, inc=False))
+    rdates = [
+        _dt.datetime(r.year, r.month, r.day, tzinfo=_dt.timezone.utc) if all_day else r
+        for r in card.yaml.get("rdate", [])
+    ]
+    for occ in generated + rdates:
         occ_end = occ + duration
         if not (_instant(occ) < end_epoch and _instant(occ_end) > start_epoch):
             continue
-        if _instant(occ) in suppress:
+        if _instant(occ) in suppress or _instant(occ) in seen:
             continue
+        seen.add(_instant(occ))
         if all_day:
             out.append(Occurrence(card, occ.date(), occ_end.date(), True))
         else:
