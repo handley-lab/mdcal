@@ -6,7 +6,7 @@ pkgdesc='An mddb-backed personal calendar'
 arch=('any')
 url='https://github.com/handley-lab/mdcal'
 license=('MIT')
-depends=('python' 'python-mddb' 'python-icalendar' 'python-slugify' 'python-yaml' 'python-dateutil' 'python-google-api-python-client' 'python-google-auth' 'python-google-auth-httplib2' 'git')
+depends=('python' 'python-mddb>=0.0.17' 'python-icalendar' 'python-slugify' 'python-yaml' 'python-dateutil' 'python-google-api-python-client' 'python-google-auth' 'python-google-auth-httplib2' 'git')
 install=python-mdcal.install
 
 package() {
