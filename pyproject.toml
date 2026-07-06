@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mdcal"
-version = "0.0.1"
+version = "0.0.2"
 description = "An mddb-backed personal calendar"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
     {name = "Handley Research Group", email = "wh260@cam.ac.uk"}
 ]
 keywords = ["calendar", "agents", "yaml", "markdown", "mddb"]
-dependencies = ["mddb", "icalendar>=6", "python-dateutil", "PyYAML>=6.0"]
+dependencies = ["mddb>=0.0.17", "icalendar>=6", "python-dateutil", "PyYAML>=6.0"]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",

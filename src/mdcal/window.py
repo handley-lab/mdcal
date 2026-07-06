@@ -90,12 +90,14 @@ def _instant(value):
 
 def _concrete(db, start_epoch, end_epoch, hide):
     rows = db.conn.execute(
-        "SELECT e.yaml_text, e.body FROM entries e "
-        "JOIN entry_fields ds ON ds.entry_rowid=e.rowid AND ds.key='dtstart_epoch' "
-        "JOIN entry_fields de ON de.entry_rowid=e.rowid AND de.key='dtend_epoch' "
-        "LEFT JOIN entry_fields rr ON rr.entry_rowid=e.rowid AND rr.key='rrule' "
-        "WHERE ds.value_num < ? AND de.value_num > ? AND rr.entry_rowid IS NULL",
-        (end_epoch, start_epoch),
+        "SELECT e.yaml_text, e.body FROM entry_fields ds "
+        "JOIN entry_fields de ON de.entry_rowid=ds.entry_rowid "
+        "AND de.key='dtend_epoch' AND de.value_num > ? "
+        "JOIN entries e ON e.rowid=ds.entry_rowid "
+        "WHERE ds.key='dtstart_epoch' AND ds.value_num < ? "
+        "AND NOT EXISTS (SELECT 1 FROM entry_fields rr "
+        "WHERE rr.entry_rowid=ds.entry_rowid AND rr.key='rrule')",
+        (start_epoch, end_epoch),
     ).fetchall()
     out = []
     for yaml_text, body in rows:
@@ -112,58 +114,48 @@ def _concrete(db, start_epoch, end_epoch, hide):
 def _hide_policy(db):
     """Per-``(source, uid)`` hide annotations from every recurring master.
 
-    Same single-pass-scan idiom as `_suppression_map`. A master's
-    ``mdcal/hidden`` tag (whole series), ``hidden_occurrences`` (epoch points),
-    and ``hidden_from`` (epoch ray) are non-owned annotations that must apply
-    to the master's exception cards too — those are separate cards, so only a
-    keyed policy built here reaches them. Keyed by ``(source, uid)`` because
-    that is mdcal's sync identity: the same iCal UID in two sources is two
-    events, and hiding one master must not touch the other. Returns a
+    A master's ``mdcal/hidden`` tag (whole series), ``hidden_occurrences``
+    (epoch points), and ``hidden_from`` (epoch ray) are non-owned annotations
+    that must apply to the master's exception cards too — those are separate
+    cards, so only a keyed policy built here reaches them. Keyed by
+    ``(source, uid)`` because that is mdcal's sync identity: the same iCal UID
+    in two sources is two events, and hiding one master must not touch the
+    other. Each annotation query joins ``source``/``uid`` per matching master
+    (the mddb v5 ``(entry_rowid, key)`` index + ANALYZE statistics make these
+    joins sub-ms, O(annotations) not O(deck)). Returns a
     ``hide(card, instant) -> bool`` closure combining the master policy with
     the occurrence card's OWN ``mdcal/hidden`` tag (which covers single events
     and directly hidden exception cards).
     """
-    uids = dict(
-        db.conn.execute(
-            "SELECT entry_rowid, value_str FROM entry_fields WHERE key='uid'"
-        ).fetchall()
+    on_master = (
+        "JOIN entry_fields u ON u.entry_rowid=a.entry_rowid AND u.key='uid' "
+        "JOIN entry_fields s ON s.entry_rowid=a.entry_rowid AND s.key='source' "
+        "WHERE a.key=? AND EXISTS (SELECT 1 FROM entry_fields r "
+        "WHERE r.entry_rowid=a.entry_rowid AND r.key='rrule')"
     )
-    sources = dict(
-        db.conn.execute(
-            "SELECT entry_rowid, value_str FROM entry_fields WHERE key='source'"
-        ).fetchall()
-    )
-    masters = {
-        rowid
-        for (rowid,) in db.conn.execute(
-            "SELECT entry_rowid FROM entry_fields WHERE key='rrule'"
-        )
-    }
-
-    def key(rowid):
-        return (sources[rowid], uids[rowid])
-
     series = {
-        key(rowid)
-        for (rowid,) in db.conn.execute(
-            "SELECT entry_rowid FROM entry_fields "
-            "WHERE key='tags' AND value_str='mdcal/hidden'"
+        (source, uid)
+        for source, uid in db.conn.execute(
+            "SELECT s.value_str, u.value_str FROM entry_fields a "
+            + on_master
+            + " AND a.value_str='mdcal/hidden'",
+            ("tags",),
         )
-        if rowid in masters
     }
     froms = {
-        key(rowid): int(value)
-        for rowid, value in db.conn.execute(
-            "SELECT entry_rowid, value_num FROM entry_fields WHERE key='hidden_from'"
+        (source, uid): int(value)
+        for source, uid, value in db.conn.execute(
+            "SELECT s.value_str, u.value_str, a.value_num FROM entry_fields a "
+            + on_master,
+            ("hidden_from",),
         )
-        if rowid in masters
     }
     points = {}
-    for rowid, value in db.conn.execute(
-        "SELECT entry_rowid, value_num FROM entry_fields WHERE key='hidden_occurrences'"
+    for source, uid, value in db.conn.execute(
+        "SELECT s.value_str, u.value_str, a.value_num FROM entry_fields a " + on_master,
+        ("hidden_occurrences",),
     ):
-        if rowid in masters:
-            points.setdefault(key(rowid), set()).add(int(value))
+        points.setdefault((source, uid), set()).add(int(value))
 
     def hide(card, instant):
         k = (card.yaml["source"], card.yaml["uid"])
@@ -183,67 +175,40 @@ def _suppression_map(db):
     Keyed by ``(source, uid)``, not ``uid``: the same iCal UID in two sources
     is two distinct events (mdcal's sync identity is ``source + uid +
     recurrence_id``), so an exception in one must not suppress the other's
-    generated slot. Single-pass index scans joined in Python: SQLite has no
-    ``(entry_rowid, key)`` index on ``entry_fields``, so joining the key ranges
-    in SQL nested-loops every row (measured 436ms on the 3,867-card deck vs
-    ~5ms this way).
+    generated slot. One three-way join, O(exceptions) not O(deck) (mddb v5
+    index + statistics).
     """
-    uids = dict(
-        db.conn.execute(
-            "SELECT entry_rowid, value_str FROM entry_fields WHERE key='uid'"
-        ).fetchall()
-    )
-    sources = dict(
-        db.conn.execute(
-            "SELECT entry_rowid, value_str FROM entry_fields WHERE key='source'"
-        ).fetchall()
-    )
     out = {}
-    for entry_rowid, rid_epoch in db.conn.execute(
-        "SELECT entry_rowid, value_num FROM entry_fields "
-        "WHERE key='recurrence_id_epoch'"
+    for source, uid, rid_epoch in db.conn.execute(
+        "SELECT s.value_str, u.value_str, a.value_num FROM entry_fields a "
+        "JOIN entry_fields u ON u.entry_rowid=a.entry_rowid AND u.key='uid' "
+        "JOIN entry_fields s ON s.entry_rowid=a.entry_rowid AND s.key='source' "
+        "WHERE a.key='recurrence_id_epoch'"
     ):
-        key = (sources[entry_rowid], uids[entry_rowid])
-        out.setdefault(key, set()).add(int(rid_epoch))
+        out.setdefault((source, uid), set()).add(int(rid_epoch))
     return out
 
 
 def _masters(db, start_epoch, end_epoch):
     """Fetch the recurring masters whose recurrence overlaps the window.
 
-    Same shape as `_suppression_map`: single-pass index scans joined in
-    Python instead of a nested-loop SQL join over ``entry_fields`` key
-    ranges (measured 205ms → ~5ms on the 3,867-card deck). The
-    ``recurrence_end_epoch`` bound (importer-computed) keeps long-dead
+    The ``recurrence_end_epoch`` bound (importer-computed) keeps long-dead
     recurrences from ever being loaded or expanded — on this deck it cuts
     the masters parsed per window from 442 to the few actually alive in it.
     A master without the bound (authored before the field existed) reads as
-    unbounded: never hidden, merely unfiltered until its next re-render.
+    unbounded (``COALESCE`` to the forever sentinel): never hidden, merely
+    unfiltered until its next re-render. The join shape needs the mddb v5
+    ``(entry_rowid, key)`` index + ANALYZE statistics.
     """
-    starts = dict(
-        db.conn.execute(
-            "SELECT entry_rowid, value_num FROM entry_fields WHERE key='dtstart_epoch'"
-        ).fetchall()
-    )
-    ends = dict(
-        db.conn.execute(
-            "SELECT entry_rowid, value_num FROM entry_fields "
-            "WHERE key='recurrence_end_epoch'"
-        ).fetchall()
-    )
-    rowids = [
-        rowid
-        for (rowid,) in db.conn.execute(
-            "SELECT entry_rowid FROM entry_fields WHERE key='rrule'"
-        )
-        if starts[rowid] < end_epoch
-        and ends.get(rowid, RECURRENCE_FOREVER_EPOCH) > start_epoch
-    ]
-    if not rowids:
-        return []
-    marks = ",".join("?" * len(rowids))
     return db.conn.execute(
-        f"SELECT yaml_text, body FROM entries WHERE rowid IN ({marks})", rowids
+        "SELECT e.yaml_text, e.body FROM entry_fields r "
+        "JOIN entry_fields ds ON ds.entry_rowid=r.entry_rowid "
+        "AND ds.key='dtstart_epoch' AND ds.value_num < ? "
+        "LEFT JOIN entry_fields re ON re.entry_rowid=r.entry_rowid "
+        "AND re.key='recurrence_end_epoch' "
+        "JOIN entries e ON e.rowid=r.entry_rowid "
+        "WHERE r.key='rrule' AND COALESCE(re.value_num, ?) > ?",
+        (end_epoch, RECURRENCE_FOREVER_EPOCH, start_epoch),
     ).fetchall()
 
 
