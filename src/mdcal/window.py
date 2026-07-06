@@ -88,14 +88,36 @@ def _instant(value):
     return int(midnight.timestamp())
 
 
-def _concrete(db, start_epoch, end_epoch, hide):
+def _concrete(db, starts, start_epoch, end_epoch, hide):
+    """Concrete (non-recurring) cards overlapping the window.
+
+    Same single-pass-scan idiom as `_masters`/`_suppression_map`: the
+    three-way SQL join over ``entry_fields`` key ranges nested-loops
+    (measured 47ms of a 99ms window on the 9,813-card personal deck vs
+    ~10ms this way). ``starts`` is the shared dtstart_epoch map fetched
+    once per window in `events_in_window`.
+    """
+    ends = dict(
+        db.conn.execute(
+            "SELECT entry_rowid, value_num FROM entry_fields WHERE key='dtend_epoch'"
+        ).fetchall()
+    )
+    recurring = {
+        rowid
+        for (rowid,) in db.conn.execute(
+            "SELECT entry_rowid FROM entry_fields WHERE key='rrule'"
+        )
+    }
+    rowids = [
+        rowid
+        for rowid, s in starts.items()
+        if s < end_epoch and ends[rowid] > start_epoch and rowid not in recurring
+    ]
+    if not rowids:
+        return []
+    marks = ",".join("?" * len(rowids))
     rows = db.conn.execute(
-        "SELECT e.yaml_text, e.body FROM entries e "
-        "JOIN entry_fields ds ON ds.entry_rowid=e.rowid AND ds.key='dtstart_epoch' "
-        "JOIN entry_fields de ON de.entry_rowid=e.rowid AND de.key='dtend_epoch' "
-        "LEFT JOIN entry_fields rr ON rr.entry_rowid=e.rowid AND rr.key='rrule' "
-        "WHERE ds.value_num < ? AND de.value_num > ? AND rr.entry_rowid IS NULL",
-        (end_epoch, start_epoch),
+        f"SELECT yaml_text, body FROM entries WHERE rowid IN ({marks})", rowids
     ).fetchall()
     out = []
     for yaml_text, body in rows:
@@ -208,7 +230,7 @@ def _suppression_map(db):
     return out
 
 
-def _masters(db, start_epoch, end_epoch):
+def _masters(db, starts, start_epoch, end_epoch):
     """Fetch the recurring masters whose recurrence overlaps the window.
 
     Same shape as `_suppression_map`: single-pass index scans joined in
@@ -219,12 +241,8 @@ def _masters(db, start_epoch, end_epoch):
     the masters parsed per window from 442 to the few actually alive in it.
     A master without the bound (authored before the field existed) reads as
     unbounded: never hidden, merely unfiltered until its next re-render.
+    ``starts`` is the shared dtstart_epoch map from `events_in_window`.
     """
-    starts = dict(
-        db.conn.execute(
-            "SELECT entry_rowid, value_num FROM entry_fields WHERE key='dtstart_epoch'"
-        ).fetchall()
-    )
     ends = dict(
         db.conn.execute(
             "SELECT entry_rowid, value_num FROM entry_fields "
@@ -305,9 +323,14 @@ def events_in_window(db, start, end):
     """
     start_epoch, end_epoch = _instant(start), _instant(end)
     hide = _hide_policy(db)
-    occurrences = _concrete(db, start_epoch, end_epoch, hide)
+    starts = dict(
+        db.conn.execute(
+            "SELECT entry_rowid, value_num FROM entry_fields WHERE key='dtstart_epoch'"
+        ).fetchall()
+    )
+    occurrences = _concrete(db, starts, start_epoch, end_epoch, hide)
     suppression = _suppression_map(db)
-    masters = _masters(db, start_epoch, end_epoch)
+    masters = _masters(db, starts, start_epoch, end_epoch)
     for yaml_text, body in masters:
         occurrences.extend(
             _expand_master(

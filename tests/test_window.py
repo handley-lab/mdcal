@@ -402,9 +402,15 @@ def test_dead_master_not_loaded(tmp_path):
     )
     from mdcal import window
 
+    starts = dict(
+        db.conn.execute(
+            "SELECT entry_rowid, value_num FROM entry_fields WHERE key='dtstart_epoch'"
+        ).fetchall()
+    )
     assert (
         window._masters(
             db,
+            starts,
             int(dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc).timestamp()),
             int(dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc).timestamp()),
         )
