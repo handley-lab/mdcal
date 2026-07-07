@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mdcal"
-version = "0.0.2"
+version = "0.0.3"
 description = "An mddb-backed personal calendar"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,11 +27,12 @@ classifiers = [
 
 [project.optional-dependencies]
 gcal = ["google-api-python-client", "google-auth", "google-auth-httplib2"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
 
 [project.scripts]
 mdcal-import = "mdcal.ics:main"
 mdcal-pull = "mdcal.gcal:main"
+mdcal-reply = "mdcal.imip:main"
 
 [project.urls]
 Homepage = "https://github.com/handley-lab/mdcal"
@@ -51,6 +52,7 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "src/mdcal/_*.py" = ["D"]
 "tests/*" = ["D"]
+"scripts/*" = ["D"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

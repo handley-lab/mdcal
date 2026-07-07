@@ -22,13 +22,14 @@ from mddb import Card
 
 from mdcal.ics import RECURRENCE_FOREVER_EPOCH, normalise_until
 
-_LOADER = getattr(_yaml, "CSafeLoader", _yaml.SafeLoader)
-"""SafeLoader semantics on the resolver's hottest path.
+_LOADER = _yaml.CSafeLoader
+"""The libyaml C SafeLoader for the resolver's hottest path.
 
-``CSafeLoader`` is the libyaml C implementation of ``SafeLoader`` — identical
-parse semantics, ~9x faster (measured 199ms → 23ms for a month window's 450
-cards on the Research deck). Falls back to the pure-Python ``SafeLoader`` on
-PyYAML builds without libyaml.
+Identical parse semantics to ``SafeLoader``, ~9x faster (measured 199ms → 23ms
+for a month window's 450 cards on the Research deck). A hard reference, not a
+``getattr`` fallback to the pure-Python loader: if libyaml is missing
+``_yaml.CSafeLoader`` raises at import, so the fast path failing is loud — never
+a silent 9x-slower degrade.
 """
 
 
