@@ -27,7 +27,7 @@ classifiers = [
 
 [project.optional-dependencies]
 gcal = ["google-api-python-client", "google-auth", "google-auth-httplib2"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
 
 [project.scripts]
 mdcal-import = "mdcal.ics:main"
@@ -51,6 +51,7 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "src/mdcal/_*.py" = ["D"]
 "tests/*" = ["D"]
+"scripts/*" = ["D"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
