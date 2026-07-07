@@ -32,6 +32,7 @@ dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.0", "tomli>=2.0"]
 [project.scripts]
 mdcal-import = "mdcal.ics:main"
 mdcal-pull = "mdcal.gcal:main"
+mdcal-reply = "mdcal.imip:main"
 
 [project.urls]
 Homepage = "https://github.com/handley-lab/mdcal"
