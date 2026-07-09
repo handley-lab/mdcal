@@ -310,20 +310,10 @@ def _add_recurrence_line(vevent, line):
     vevent.add(key, points)
 
 
-def _event_body(card):
-    """Map a card to a Google API event resource.
-
-    Scalars come from the flat yaml; ``recurrence`` lines come verbatim from
-    the card's fenced VEVENT (unfolded) — re-serialising EXDATEs from the
-    flat yaml would re-normalise their form, and the fence is always current
-    (both the importer and web writes regenerate it).
-    """
+def _fields_body(card):
+    """The card's per-event Google fields: times, summary, location, description."""
     yaml = card.yaml
-    body = {
-        "iCalUID": yaml["uid"],
-        "summary": card.title,
-        "sequence": yaml["sequence"],
-    }
+    body = {"summary": card.title}
     if yaml["all_day"]:
         body["start"] = {"date": yaml["dtstart"].isoformat()}
         body["end"] = {"date": yaml["dtend"].isoformat()}
@@ -338,10 +328,91 @@ def _event_body(card):
     description = card.body.split("```ics", 1)[0].strip()
     if description:
         body["description"] = description
+    return body
+
+
+def _event_body(card):
+    """Map a card to a Google API event resource.
+
+    Scalars come from the flat yaml; ``recurrence`` lines come verbatim from
+    the card's fenced VEVENT (unfolded) — re-serialising EXDATEs from the
+    flat yaml would re-normalise their form, and the fence is always current
+    (both the importer and web writes regenerate it).
+    """
+    yaml = card.yaml
+    body = {
+        "iCalUID": yaml["uid"],
+        "sequence": yaml["sequence"],
+        **_fields_body(card),
+    }
     recurrence = _recurrence_lines(card.body)
     if recurrence:
         body["recurrence"] = recurrence
     return body
+
+
+def patch_instance(credentials, calendar_id, uid, original_start, card):
+    """Patch one occurrence of a recurring Google event — its exception instance.
+
+    Google models a modified occurrence as a sibling event carrying
+    ``recurringEventId`` (the master) and ``originalStartTime`` (the slot it
+    replaces); patching that instance creates or updates the exception
+    server-side, and Google's ICS export renders it as a ``RECURRENCE-ID``
+    VEVENT the importer already understands. The master is resolved by
+    iCalUID (as `delete_event` does); the instance by the API's
+    ``originalStart`` filter. ``showDeleted`` is on, so patching a cancelled
+    instance back to ``confirmed`` revives it (the undo path).
+
+    The patch body carries the card's fields plus ``status``; Google owns the
+    instance's sequence on patch, so none is sent.
+
+    Args:
+        credentials: A ``google.oauth2.credentials.Credentials``.
+        calendar_id: The Google calendar id.
+        uid: The master's iCalUID.
+        original_start: The ORIGINAL occurrence start (tz-aware ``datetime``,
+            or ``date`` for an all-day series) identifying the slot.
+        card: The rendered override (``mdcal.ics.RenderedCard`` or
+            ``mddb.Card``) carrying the occurrence's new state.
+
+    Returns:
+        The tz-aware ``dispatched`` watermark (the patched instance's
+        ``updated``, second-truncated).
+
+    Raises:
+        ValueError: No live master with that iCalUID, or the series has no
+            instance at ``original_start``.
+    """
+    service = _service(credentials)
+    items = (
+        service.events().list(calendarId=calendar_id, iCalUID=uid).execute()["items"]
+    )
+    masters = [
+        item
+        for item in items
+        if not item.get("recurringEventId") and item["status"] != "cancelled"
+    ]
+    if not masters:
+        raise ValueError(f"no live Google master for iCalUID {uid}")
+    instances = (
+        service.events()
+        .instances(
+            calendarId=calendar_id,
+            eventId=masters[0]["id"],
+            originalStart=original_start.isoformat(),
+            showDeleted=True,
+        )
+        .execute()["items"]
+    )
+    if not instances:
+        raise ValueError(f"no instance of {uid} at {original_start.isoformat()}")
+    body = {**_fields_body(card), "status": card.yaml["status"].lower()}
+    result = (
+        service.events()
+        .patch(calendarId=calendar_id, eventId=instances[0]["id"], body=body)
+        .execute()
+    )
+    return _watermark(result["updated"])
 
 
 def _recurrence_lines(body):
