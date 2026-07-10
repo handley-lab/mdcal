@@ -248,6 +248,11 @@ def test_visibility_default_emits_no_class(monkeypatch):
     assert vevent.get("CLASS") is None
 
 
+def test_event_label_id_capture_only(monkeypatch):
+    vevent = _export({**FULL, "eventLabelId": "label7"}, monkeypatch)
+    assert str(vevent["X-GOOGLE-EVENT-LABEL-ID"]) == "label7"
+
+
 def test_event_type_and_bag(monkeypatch):
     vevent = _export(
         {

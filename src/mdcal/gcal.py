@@ -302,6 +302,7 @@ COMPLETENESS = {
                 "guestsCanSeeOtherGuests",
                 "anyoneCanAddSelf",
                 "source",
+                "eventLabelId",
                 "workingLocationProperties",
                 "outOfOfficeProperties",
                 "focusTimeProperties",
@@ -396,6 +397,11 @@ Exclusion rationales:
         content and ``key`` is REQUIRED for the copy round-trip (the same
         probe: a name-only solution makes Google drop the conference).
     attachment.iconLink: display plumbing derivable from the file.
+
+event.eventLabelId maps to ``X-GOOGLE-EVENT-LABEL-ID`` CAPTURE-ONLY: the
+field is undocumented in the Events resource (observed live 2026-07-10 —
+the canary caught it), so there is no documented write path; a derived
+event does not carry the label.
 
 Structures carried VERBATIM as compact JSON need no nested entry — the
 whole bag is preserved by construction: extendedProperties and the
@@ -615,6 +621,8 @@ def _item_to_vevent(item, excluded, default_tz, master_zone, calendar_id):
 
     if item.get("colorId"):
         vevent.add("X-GOOGLE-COLOR-ID", item["colorId"])
+    if item.get("eventLabelId"):
+        vevent.add("X-GOOGLE-EVENT-LABEL-ID", item["eventLabelId"])
     flags = {key: item[key] for key in _GUEST_FLAGS if key in item}
     if flags:
         vevent.add("X-GOOGLE-GUESTS-CAN", _compact(flags))
