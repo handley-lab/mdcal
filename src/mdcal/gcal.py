@@ -1,7 +1,9 @@
 """Google Calendar write-through for synced feed sources.
 
 Pushes event cards to the Google Calendar API keyed on the card's own
-``uid`` (``events.import`` upserts on iCalUID, so create and edit unify) and
+``uid`` — merge-safe: an existing live master is PATCHED (owned fields with
+explicit clearing forms; Google-owned fields preserved server-side), an
+absent one is imported with the card's full fence enrichment — and
 deletes by iCalUID lookup. Google is primary: callers mutate the deck only
 after these functions return, carrying the returned watermark as the card's
 ``dispatched`` guard so the lagging ICS feed can't revert the write before it
@@ -18,6 +20,7 @@ import argparse
 import datetime as _dt
 import json as _json
 import re as _re
+from urllib.parse import urlsplit as _urlsplit
 from zoneinfo import ZoneInfo
 
 import httplib2
@@ -764,6 +767,21 @@ def _enrichment_body(vevent):
                 solution["key"] = {"type": str(solutions[0].params["X-GOOGLE-KEY-TYPE"])}
             conference["conferenceSolution"] = solution
         body["conferenceData"] = conference
+    elif vevent.get("X-GOOGLE-CONFERENCE"):
+        # A bare join link (what Google's own feed exports and pre-enrichment
+        # cards carry). Google drops entryPoints without a conferenceSolution
+        # (live-probed), so synthesize the one the URI implies: meet URIs ARE
+        # Google Meet; anything else uses Google's generic addOn type, which
+        # round-trips verbatim (probed with a Zoom URI).
+        uri = str(vevent["X-GOOGLE-CONFERENCE"])
+        if "meet.google.com" in uri:
+            solution = {"name": "Google Meet", "key": {"type": "hangoutsMeet"}}
+        else:
+            solution = {"name": _urlsplit(uri).netloc or uri, "key": {"type": "addOn"}}
+        body["conferenceData"] = {
+            "entryPoints": [{"entryPointType": "video", "uri": uri}],
+            "conferenceSolution": solution,
+        }
 
     attachments = []
     for prop in _fence_props(vevent, "ATTACH"):

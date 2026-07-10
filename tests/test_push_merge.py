@@ -158,6 +158,30 @@ def test_push_imports_absent_with_enrichment(monkeypatch):
     assert body["extendedProperties"] == {"private": {"k": "v"}}
 
 
+def test_push_import_synthesizes_conference_from_bare_link(monkeypatch):
+    service = _PushService(listed=[])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: service)
+    gcal.push_event(
+        None, "cal", _card(BARE + "\nX-GOOGLE-CONFERENCE:https://meet.google.com/xyz")
+    )
+    ((body, kwargs),) = service.imports
+    assert kwargs == {"conferenceDataVersion": 1}
+    assert body["conferenceData"] == {
+        "entryPoints": [{"entryPointType": "video", "uri": "https://meet.google.com/xyz"}],
+        "conferenceSolution": {"name": "Google Meet", "key": {"type": "hangoutsMeet"}},
+    }
+    service = _PushService(listed=[])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: service)
+    gcal.push_event(
+        None, "cal", _card(BARE + "\nX-GOOGLE-CONFERENCE:https://zoom.us/j/123")
+    )
+    ((body, _),) = service.imports
+    assert body["conferenceData"]["conferenceSolution"] == {
+        "name": "zoom.us",
+        "key": {"type": "addOn"},
+    }
+
+
 def test_push_import_reminders_none_state(monkeypatch):
     service = _PushService(listed=[])
     monkeypatch.setattr(gcal, "_service", lambda credentials: service)
