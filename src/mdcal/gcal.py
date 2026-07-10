@@ -65,6 +65,20 @@ def _watermark(updated):
 def push_event(credentials, calendar_id, card):
     """Upsert a card's event in Google, keyed on the card's ``uid``.
 
+    Merge-safe: an EXISTING live master is PATCHED, never imported —
+    ``events.import`` replaces the whole resource (proven live: one import
+    wiped the attendees, colour, and reminders Google held but the card did
+    not carry). The patch body always sends the mdcal-owned fields with
+    explicit clearing forms (``None``/``[]``; omitting a cleared field would
+    leave Google's value standing for the feed to re-import) and never the
+    Google-owned ones (attendees, conferenceData, reminders, colorId,
+    visibility, attachments, extendedProperties, guest flags), which patch
+    preserves server-side. When no live master exists (create, or an
+    undo-restore after a Google-side delete) there is nothing to preserve:
+    ``events.import`` sends the card's full state including its fence
+    enrichment (`_event_body`) — live probes show every captured class
+    round-trips through import.
+
     Sends the card's ``sequence`` verbatim — the caller owns the increment
     (Google rejects stale sequences with a 400, so the caller must bump it
     from the existing card before rendering).
@@ -78,13 +92,41 @@ def push_event(credentials, calendar_id, card):
     Returns:
         The tz-aware ``dispatched`` watermark (the API's ``updated``,
         second-truncated).
+
+    Raises:
+        ValueError: The card's fence carries ``X-GOOGLE-ATTENDEES-OMITTED``
+            and no live master exists — a known-incomplete attendee list
+            must not seed a new Google event.
     """
-    result = (
-        _service(credentials)
-        .events()
-        .import_(calendarId=calendar_id, body=_event_body(card))
-        .execute()
+    service = _service(credentials)
+    items = (
+        service.events()
+        .list(calendarId=calendar_id, iCalUID=card.yaml["uid"], showDeleted=True)
+        .execute()["items"]
     )
+    live = [
+        item
+        for item in items
+        if not item.get("recurringEventId") and item["status"] != "cancelled"
+    ]
+    if live:
+        result = (
+            service.events()
+            .patch(calendarId=calendar_id, eventId=live[0]["id"], body=_patch_body(card))
+            .execute()
+        )
+    else:
+        body = _event_body(card)
+        kwargs = {}
+        if "attachments" in body:
+            kwargs["supportsAttachments"] = True
+        if "conferenceData" in body:
+            kwargs["conferenceDataVersion"] = 1
+        result = (
+            service.events()
+            .import_(calendarId=calendar_id, body=body, **kwargs)
+            .execute()
+        )
     return _watermark(result["updated"])
 
 
@@ -264,9 +306,10 @@ COMPLETENESS = {
         frozenset(),
     ),
     "conference solution": (
-        frozenset({"name"}),
-        frozenset({"key", "iconUri"}),
+        frozenset({"name", "key"}),
+        frozenset({"iconUri"}),
     ),
+    "conference solution key": (frozenset({"type"}), frozenset()),
     "attachment": (
         frozenset({"fileUrl", "title", "mimeType", "fileId"}),
         frozenset({"iconLink"}),
@@ -292,9 +335,12 @@ Exclusion rationales:
     attendee.organizer: derivable from the top-level ORGANIZER property.
     attendee.id: profile-directory plumbing.
     conferenceData.createRequest/signature/parameters: conference-request
-        lifecycle plumbing, not the conference itself.
-    conference solution.key/iconUri: service branding; the solution ``name``
-        is the content.
+        lifecycle plumbing, not the conference itself — a live probe showed
+        the minimal copy body (entryPoints + conferenceId + solution
+        name+key) round-trips through ``events.import`` without them.
+    conference solution.iconUri: service branding; ``name`` is the display
+        content and ``key`` is REQUIRED for the copy round-trip (the same
+        probe: a name-only solution makes Google drop the conference).
     attachment.iconLink: display plumbing derivable from the file.
 
 Structures carried VERBATIM as compact JSON need no nested entry — the
@@ -335,6 +381,10 @@ _GUEST_FLAGS = (
     "guestsCanSeeOtherGuests",
     "anyoneCanAddSelf",
 )
+_GOOGLE_STATUS = {ical: google for google, ical in _STATUS.items()}
+_GOOGLE_PARTSTAT = {ical: google for google, ical in _PARTSTAT.items()}
+_GOOGLE_CLASS = {ical: google for google, ical in _CLASS.items()}
+_GOOGLE_TRANSP = {ical: google for google, ical in _TRANSP.items()}
 
 
 def _known(obj, context):
@@ -441,9 +491,14 @@ def _item_to_vevent(item, excluded, default_tz, master_zone, calendar_id):
         if data.get("notes"):
             vevent.add("X-GOOGLE-CONFERENCE-NOTES", data["notes"])
         if data.get("conferenceSolution"):
-            _known(data["conferenceSolution"], "conference solution")
+            solution = data["conferenceSolution"]
+            _known(solution, "conference solution")
+            params = {}
+            if solution.get("key"):
+                _known(solution["key"], "conference solution key")
+                params["X-GOOGLE-KEY-TYPE"] = solution["key"]["type"]
             vevent.add(
-                "X-GOOGLE-CONFERENCE-SOLUTION", data["conferenceSolution"]["name"]
+                "X-GOOGLE-CONFERENCE-SOLUTION", solution["name"], parameters=params
             )
 
     organizer = item.get("organizer", {})
@@ -559,9 +614,18 @@ def _add_recurrence_line(vevent, line):
 
 
 def _fields_body(card):
-    """The card's per-event Google fields: times, summary, location, description."""
+    """The card's owned Google fields, patch-shaped: explicit clearing forms.
+
+    ``location``/``description`` are ALWAYS present, ``None`` when the card
+    lacks them — ``events.patch`` merges, so omission would leave Google's
+    old value standing and the lagging feed would re-import it onto the very
+    card that just cleared it (live-probed: ``None`` clears).
+    """
     yaml = card.yaml
-    body = {"summary": card.title}
+    body = {
+        "summary": card.title,
+        "status": _enum(yaml["status"], _GOOGLE_STATUS, "event status"),
+    }
     if yaml["all_day"]:
         body["start"] = {"date": yaml["dtstart"].isoformat()}
         body["end"] = {"date": yaml["dtend"].isoformat()}
@@ -571,31 +635,182 @@ def _fields_body(card):
             "timeZone": yaml["tzid"],
         }
         body["end"] = {"dateTime": yaml["dtend"].isoformat(), "timeZone": yaml["tzid"]}
-    if yaml.get("location"):
-        body["location"] = yaml["location"]
+    body["location"] = yaml.get("location") or None
     description = card.body.split("```ics", 1)[0].strip()
-    if description:
-        body["description"] = description
+    body["description"] = description or None
     return body
 
 
-def _event_body(card):
-    """Map a card to a Google API event resource.
+def _patch_body(card):
+    """The merge-safe patch body: owned fields only, clearing forms included.
 
-    Scalars come from the flat yaml; ``recurrence`` lines come verbatim from
-    the card's fenced VEVENT (unfolded) — re-serialising EXDATEs from the
-    flat yaml would re-normalise their form, and the fence is always current
-    (both the importer and web writes regenerate it).
+    ``recurrence`` is always present — ``[]`` clears a rule the card no
+    longer has (repeat → none; live-probed). Google-owned fields are never
+    sent; patch preserves them server-side.
+    """
+    return {
+        **_fields_body(card),
+        "sequence": card.yaml["sequence"],
+        "recurrence": _recurrence_lines(card.body),
+    }
+
+
+def _event_body(card):
+    """Map a card to a full Google event resource for ``events.import``.
+
+    Import replaces, so this is the create-shaped body: owned scalars from
+    the flat yaml (``None`` clearing forms stripped — omission and clearing
+    coincide under replace semantics), ``recurrence`` lines verbatim from
+    the card's fenced VEVENT (unfolded; re-serialising EXDATEs from the flat
+    yaml would re-normalise their form), and the fence's full enrichment
+    reverse-mapped to API fields (`_enrichment_body`).
     """
     yaml = card.yaml
     body = {
         "iCalUID": yaml["uid"],
         "sequence": yaml["sequence"],
-        **_fields_body(card),
+        **{k: v for k, v in _fields_body(card).items() if v is not None},
+        **_enrichment_body(_fence_event(card.body)),
     }
     recurrence = _recurrence_lines(card.body)
     if recurrence:
         body["recurrence"] = recurrence
+    return body
+
+
+def _fence_event(body):
+    fence = _re.search(r"```ics\n(.*?)\n```", body, _re.DOTALL).group(1)
+    return icalendar.Event.from_ical(fence)
+
+
+def _fence_props(vevent, name):
+    raw = vevent.get(name)
+    if raw is None:
+        return []
+    return raw if isinstance(raw, list) else [raw]
+
+
+_ENTRY_PARAMS = (
+    ("LABEL", "label"),
+    ("PIN", "pin"),
+    ("ACCESS-CODE", "accessCode"),
+    ("MEETING-CODE", "meetingCode"),
+    ("PASSCODE", "passcode"),
+    ("PASSWORD", "password"),
+    ("REGION-CODE", "regionCode"),
+)
+
+
+def _enrichment_body(vevent):
+    """Fence enrichment properties → Google API fields, the capture inverse.
+
+    Runs only where there is no server state to preserve (import/create):
+    live probes show attendees round-trip without invitations (import has no
+    ``sendUpdates``), attachments/reminders/colour/visibility/guest flags/
+    extended properties survive verbatim, and a conference copies from
+    entryPoints + conferenceId + solution name+key.
+
+    Raises:
+        ValueError: The fence carries ``X-GOOGLE-ATTENDEES-OMITTED`` — the
+            attendee list is known-incomplete (Google capped it) and must
+            not seed a new event that pretends it is the full invite list.
+    """
+    if vevent.get("X-GOOGLE-ATTENDEES-OMITTED"):
+        raise ValueError(
+            "attendee list is incomplete (attendeesOmitted): refusing to "
+            "seed a new Google event from it"
+        )
+    body = {}
+    attendees = []
+    for prop in _fence_props(vevent, "ATTENDEE"):
+        params = prop.params
+        attendee = {"email": _re.sub(r"^mailto:", "", str(prop), flags=_re.I)}
+        if params.get("CN"):
+            attendee["displayName"] = str(params["CN"])
+        if params.get("PARTSTAT"):
+            attendee["responseStatus"] = _enum(
+                str(params["PARTSTAT"]), _GOOGLE_PARTSTAT, "PARTSTAT"
+            )
+        if str(params.get("ROLE", "")) == "OPT-PARTICIPANT":
+            attendee["optional"] = True
+        if str(params.get("CUTYPE", "")) == "RESOURCE":
+            attendee["resource"] = True
+        if params.get("X-NUM-GUESTS"):
+            attendee["additionalGuests"] = int(str(params["X-NUM-GUESTS"]))
+        if params.get("X-GOOGLE-COMMENT"):
+            attendee["comment"] = str(params["X-GOOGLE-COMMENT"])
+        attendees.append(attendee)
+    if attendees:
+        body["attendees"] = attendees
+
+    entries = _fence_props(vevent, "X-GOOGLE-CONFERENCE-ENTRY")
+    if entries:
+        points = []
+        for prop in entries:
+            point = {"entryPointType": str(prop.params["TYPE"]), "uri": str(prop)}
+            for param, key in _ENTRY_PARAMS:
+                if prop.params.get(param):
+                    point[key] = str(prop.params[param])
+            points.append(point)
+        conference = {"entryPoints": points}
+        if vevent.get("X-GOOGLE-CONFERENCE-ID"):
+            conference["conferenceId"] = str(vevent["X-GOOGLE-CONFERENCE-ID"])
+        if vevent.get("X-GOOGLE-CONFERENCE-NOTES"):
+            conference["notes"] = str(vevent["X-GOOGLE-CONFERENCE-NOTES"])
+        solutions = _fence_props(vevent, "X-GOOGLE-CONFERENCE-SOLUTION")
+        if solutions:
+            solution = {"name": str(solutions[0])}
+            if solutions[0].params.get("X-GOOGLE-KEY-TYPE"):
+                solution["key"] = {"type": str(solutions[0].params["X-GOOGLE-KEY-TYPE"])}
+            conference["conferenceSolution"] = solution
+        body["conferenceData"] = conference
+
+    attachments = []
+    for prop in _fence_props(vevent, "ATTACH"):
+        attachment = {"fileUrl": str(prop)}
+        if prop.params.get("FMTTYPE"):
+            attachment["mimeType"] = str(prop.params["FMTTYPE"])
+        if prop.params.get("FILENAME"):
+            attachment["title"] = str(prop.params["FILENAME"])
+        if prop.params.get("X-GOOGLE-FILE-ID"):
+            attachment["fileId"] = str(prop.params["X-GOOGLE-FILE-ID"])
+        attachments.append(attachment)
+    if attachments:
+        body["attachments"] = attachments
+
+    overrides = [
+        {"method": method, "minutes": int(minutes)}
+        for prop in _fence_props(vevent, "X-GOOGLE-REMINDER")
+        for method, minutes in [str(prop).split(",", 1)]
+    ]
+    if overrides:
+        body["reminders"] = {"useDefault": False, "overrides": overrides}
+    elif vevent.get("X-GOOGLE-REMINDERS"):
+        body["reminders"] = {"useDefault": False, "overrides": []}
+
+    if vevent.get("TRANSP"):
+        body["transparency"] = _enum(
+            str(vevent["TRANSP"]), _GOOGLE_TRANSP, "TRANSP"
+        )
+    if vevent.get("CLASS"):
+        body["visibility"] = _enum(str(vevent["CLASS"]), _GOOGLE_CLASS, "CLASS")
+    if vevent.get("X-GOOGLE-COLOR-ID"):
+        body["colorId"] = str(vevent["X-GOOGLE-COLOR-ID"])
+    if vevent.get("X-GOOGLE-GUESTS-CAN"):
+        body.update(_json.loads(str(vevent["X-GOOGLE-GUESTS-CAN"])))
+    if vevent.get("X-GOOGLE-EXTENDED-PROPS"):
+        body["extendedProperties"] = _json.loads(str(vevent["X-GOOGLE-EXTENDED-PROPS"]))
+    if vevent.get("X-GOOGLE-EVENT-TYPE"):
+        body["eventType"] = str(vevent["X-GOOGLE-EVENT-TYPE"])
+    for key, prop in _BAGS.items():
+        if vevent.get(prop):
+            body[key] = _json.loads(str(vevent[prop]))
+    sources = _fence_props(vevent, "X-GOOGLE-SOURCE")
+    if sources:
+        source = {"url": str(sources[0])}
+        if sources[0].params.get("TITLE"):
+            source["title"] = str(sources[0].params["TITLE"])
+        body["source"] = source
     return body
 
 
@@ -611,8 +826,11 @@ def patch_instance(credentials, calendar_id, uid, original_start, card):
     ``originalStart`` filter. ``showDeleted`` is on, so patching a cancelled
     instance back to ``confirmed`` revives it (the undo path).
 
-    The patch body carries the card's fields plus ``status``; Google owns the
-    instance's sequence on patch, so none is sent.
+    The patch body is `_fields_body`: the owned instance fields with explicit
+    clearing forms (``location: None`` / ``description: None`` when the card
+    lacks them — omission would leave the instance's old value standing for
+    the feed to revert) plus ``status``; Google owns the instance's sequence
+    on patch, so none is sent, and no recurrence (instances have none).
 
     Args:
         credentials: A ``google.oauth2.credentials.Credentials``.
@@ -654,10 +872,9 @@ def patch_instance(credentials, calendar_id, uid, original_start, card):
     )
     if not instances:
         raise ValueError(f"no instance of {uid} at {original_start.isoformat()}")
-    body = {**_fields_body(card), "status": card.yaml["status"].lower()}
     result = (
         service.events()
-        .patch(calendarId=calendar_id, eventId=instances[0]["id"], body=body)
+        .patch(calendarId=calendar_id, eventId=instances[0]["id"], body=_fields_body(card))
         .execute()
     )
     return _watermark(result["updated"])

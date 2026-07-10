@@ -152,6 +152,7 @@ def test_full_fixture_maps_every_field(monkeypatch):
     assert _params(phone)["REGION-CODE"] == "GB"
     assert str(vevent["X-GOOGLE-CONFERENCE-ID"]) == "abc-defg-hij"
     assert str(vevent["X-GOOGLE-CONFERENCE-SOLUTION"]) == "Google Meet"
+    assert _params(vevent["X-GOOGLE-CONFERENCE-SOLUTION"])["X-GOOGLE-KEY-TYPE"] == "hangoutsMeet"
     assert str(vevent["X-GOOGLE-CONFERENCE-NOTES"]) == "dial-in below"
     assert str(vevent["X-GOOGLE-CONFERENCE"]) == "https://meet.google.com/abc"
 
