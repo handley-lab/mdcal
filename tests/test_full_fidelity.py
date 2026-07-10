@@ -152,7 +152,10 @@ def test_full_fixture_maps_every_field(monkeypatch):
     assert _params(phone)["REGION-CODE"] == "GB"
     assert str(vevent["X-GOOGLE-CONFERENCE-ID"]) == "abc-defg-hij"
     assert str(vevent["X-GOOGLE-CONFERENCE-SOLUTION"]) == "Google Meet"
-    assert _params(vevent["X-GOOGLE-CONFERENCE-SOLUTION"])["X-GOOGLE-KEY-TYPE"] == "hangoutsMeet"
+    assert (
+        _params(vevent["X-GOOGLE-CONFERENCE-SOLUTION"])["X-GOOGLE-KEY-TYPE"]
+        == "hangoutsMeet"
+    )
     assert str(vevent["X-GOOGLE-CONFERENCE-NOTES"]) == "dial-in below"
     assert str(vevent["X-GOOGLE-CONFERENCE"]) == "https://meet.google.com/abc"
 
@@ -282,11 +285,11 @@ def test_canary_unknown_nested_fields(monkeypatch):
             monkeypatch,
         )
     with pytest.raises(ValueError, match="unmapped Google attachment"):
-        _export({**FULL, "attachments": [{"fileUrl": "u", "sizeBytes": 3}]}, monkeypatch)
-    with pytest.raises(ValueError, match="unmapped Google reminders"):
         _export(
-            {**FULL, "reminders": {"useDefault": False, "snooze": 1}}, monkeypatch
+            {**FULL, "attachments": [{"fileUrl": "u", "sizeBytes": 3}]}, monkeypatch
         )
+    with pytest.raises(ValueError, match="unmapped Google reminders"):
+        _export({**FULL, "reminders": {"useDefault": False, "snooze": 1}}, monkeypatch)
     with pytest.raises(ValueError, match="unmapped Google source"):
         _export({**FULL, "source": {"url": "u", "favicon": "f"}}, monkeypatch)
     with pytest.raises(ValueError, match="unmapped Google person"):

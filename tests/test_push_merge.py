@@ -167,7 +167,9 @@ def test_push_import_synthesizes_conference_from_bare_link(monkeypatch):
     ((body, kwargs),) = service.imports
     assert kwargs == {"conferenceDataVersion": 1}
     assert body["conferenceData"] == {
-        "entryPoints": [{"entryPointType": "video", "uri": "https://meet.google.com/xyz"}],
+        "entryPoints": [
+            {"entryPointType": "video", "uri": "https://meet.google.com/xyz"}
+        ],
         "conferenceSolution": {"name": "Google Meet", "key": {"type": "hangoutsMeet"}},
     }
     service = _PushService(listed=[])

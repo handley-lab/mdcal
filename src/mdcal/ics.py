@@ -305,9 +305,7 @@ def vevent_to_card(vevent, source):
         "organizer": _email(vevent["ORGANIZER"]) if vevent.get("ORGANIZER") else None,
         "attendee_emails": _attendees(vevent) or None,
         "attendees": _attendee_details(vevent) or None,
-        "attendees_omitted": True
-        if vevent.get("X-GOOGLE-ATTENDEES-OMITTED")
-        else None,
+        "attendees_omitted": True if vevent.get("X-GOOGLE-ATTENDEES-OMITTED") else None,
         "my_status": _my_status(vevent),
         "conference": _conference_entries(vevent) or None,
         "conference_url": str(vevent["X-GOOGLE-CONFERENCE"])

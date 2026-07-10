@@ -115,7 +115,9 @@ def push_event(credentials, calendar_id, card):
     if live:
         result = (
             service.events()
-            .patch(calendarId=calendar_id, eventId=live[0]["id"], body=_patch_body(card))
+            .patch(
+                calendarId=calendar_id, eventId=live[0]["id"], body=_patch_body(card)
+            )
             .execute()
         )
     else:
@@ -265,25 +267,57 @@ def export_ics(credentials, calendar_id):
 
 COMPLETENESS = {
     "event": (
-        frozenset({
-            "id", "iCalUID", "status", "summary", "description", "location",
-            "start", "end", "recurrence", "recurringEventId",
-            "originalStartTime", "transparency", "visibility", "sequence",
-            "attendees", "attendeesOmitted", "organizer", "creator",
-            "created", "updated", "htmlLink", "colorId", "hangoutLink",
-            "conferenceData", "reminders", "attachments",
-            "extendedProperties", "eventType", "guestsCanModify",
-            "guestsCanInviteOthers", "guestsCanSeeOtherGuests",
-            "anyoneCanAddSelf", "source", "workingLocationProperties",
-            "outOfOfficeProperties", "focusTimeProperties",
-            "birthdayProperties",
-        }),
-        frozenset({
-            "kind", "etag",
-            "endTimeUnspecified",
-            "privateCopy", "locked",
-            "gadget",
-        }),
+        frozenset(
+            {
+                "id",
+                "iCalUID",
+                "status",
+                "summary",
+                "description",
+                "location",
+                "start",
+                "end",
+                "recurrence",
+                "recurringEventId",
+                "originalStartTime",
+                "transparency",
+                "visibility",
+                "sequence",
+                "attendees",
+                "attendeesOmitted",
+                "organizer",
+                "creator",
+                "created",
+                "updated",
+                "htmlLink",
+                "colorId",
+                "hangoutLink",
+                "conferenceData",
+                "reminders",
+                "attachments",
+                "extendedProperties",
+                "eventType",
+                "guestsCanModify",
+                "guestsCanInviteOthers",
+                "guestsCanSeeOtherGuests",
+                "anyoneCanAddSelf",
+                "source",
+                "workingLocationProperties",
+                "outOfOfficeProperties",
+                "focusTimeProperties",
+                "birthdayProperties",
+            }
+        ),
+        frozenset(
+            {
+                "kind",
+                "etag",
+                "endTimeUnspecified",
+                "privateCopy",
+                "locked",
+                "gadget",
+            }
+        ),
     ),
     "time": (frozenset({"date", "dateTime", "timeZone"}), frozenset()),
     "person": (
@@ -291,10 +325,18 @@ COMPLETENESS = {
         frozenset({"displayName", "self", "id"}),
     ),
     "attendee": (
-        frozenset({
-            "email", "displayName", "responseStatus", "optional", "resource",
-            "additionalGuests", "self", "comment",
-        }),
+        frozenset(
+            {
+                "email",
+                "displayName",
+                "responseStatus",
+                "optional",
+                "resource",
+                "additionalGuests",
+                "self",
+                "comment",
+            }
+        ),
         frozenset({"organizer", "id"}),
     ),
     "conferenceData": (
@@ -302,10 +344,19 @@ COMPLETENESS = {
         frozenset({"createRequest", "signature", "parameters"}),
     ),
     "conference entry point": (
-        frozenset({
-            "entryPointType", "uri", "label", "pin", "accessCode",
-            "meetingCode", "passcode", "password", "regionCode",
-        }),
+        frozenset(
+            {
+                "entryPointType",
+                "uri",
+                "label",
+                "pin",
+                "accessCode",
+                "meetingCode",
+                "passcode",
+                "password",
+                "regionCode",
+            }
+        ),
         frozenset(),
     ),
     "conference solution": (
@@ -779,7 +830,9 @@ def _enrichment_body(vevent):
         if solutions:
             solution = {"name": str(solutions[0])}
             if solutions[0].params.get("X-GOOGLE-KEY-TYPE"):
-                solution["key"] = {"type": str(solutions[0].params["X-GOOGLE-KEY-TYPE"])}
+                solution["key"] = {
+                    "type": str(solutions[0].params["X-GOOGLE-KEY-TYPE"])
+                }
         else:
             video = next(
                 (p["uri"] for p in points if p["entryPointType"] == "video"),
@@ -819,9 +872,7 @@ def _enrichment_body(vevent):
         body["reminders"] = {"useDefault": False, "overrides": []}
 
     if vevent.get("TRANSP"):
-        body["transparency"] = _enum(
-            str(vevent["TRANSP"]), _GOOGLE_TRANSP, "TRANSP"
-        )
+        body["transparency"] = _enum(str(vevent["TRANSP"]), _GOOGLE_TRANSP, "TRANSP")
     if vevent.get("CLASS"):
         body["visibility"] = _enum(str(vevent["CLASS"]), _GOOGLE_CLASS, "CLASS")
     if vevent.get("X-GOOGLE-COLOR-ID"):
@@ -904,7 +955,9 @@ def patch_instance(credentials, calendar_id, uid, original_start, card):
         raise ValueError(f"no instance of {uid} at {original_start.isoformat()}")
     result = (
         service.events()
-        .patch(calendarId=calendar_id, eventId=instances[0]["id"], body=_fields_body(card))
+        .patch(
+            calendarId=calendar_id, eventId=instances[0]["id"], body=_fields_body(card)
+        )
         .execute()
     )
     return _watermark(result["updated"])
