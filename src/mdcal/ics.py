@@ -42,7 +42,11 @@ EVENT_KEYS = (
     "location",
     "organizer",
     "attendee_emails",
+    "attendees",
+    "my_status",
+    "conference",
     "conference_url",
+    "attachments",
     "created",
     "last_modified",
     "gcal_id",
@@ -299,9 +303,13 @@ def vevent_to_card(vevent, source):
         "location": str(vevent["LOCATION"]) if vevent.get("LOCATION") else None,
         "organizer": _email(vevent["ORGANIZER"]) if vevent.get("ORGANIZER") else None,
         "attendee_emails": _attendees(vevent) or None,
+        "attendees": _attendee_details(vevent) or None,
+        "my_status": _my_status(vevent),
+        "conference": _conference_entries(vevent) or None,
         "conference_url": str(vevent["X-GOOGLE-CONFERENCE"])
         if vevent.get("X-GOOGLE-CONFERENCE")
         else None,
+        "attachments": _attachments(vevent) or None,
         "gcal_id": str(vevent["X-GOOGLE-EVENT-ID"])
         if vevent.get("X-GOOGLE-EVENT-ID")
         else None,
@@ -352,6 +360,71 @@ def _attendees(vevent):
     if raw is None:
         return []
     return [_email(a) for a in (raw if isinstance(raw, list) else [raw])]
+
+
+def _attendee_props(vevent):
+    raw = vevent.get("ATTENDEE")
+    if raw is None:
+        return []
+    return raw if isinstance(raw, list) else [raw]
+
+
+def _attendee_details(vevent):
+    """Display-shaped attendee list from ATTENDEE properties and their params.
+
+    ``status`` carries the PARTSTAT token verbatim (``ACCEPTED``,
+    ``NEEDS-ACTION``, or whatever a foreign feed wrote) — faithful to the
+    source; Google's value vocabulary is enforced only at the API boundary
+    where mdcal itself writes.
+    """
+    out = []
+    for prop in _attendee_props(vevent):
+        params = prop.params
+        entry = {"email": _email(prop)}
+        if params.get("CN"):
+            entry["name"] = str(params["CN"])
+        if params.get("PARTSTAT"):
+            entry["status"] = str(params["PARTSTAT"])
+        if str(params.get("ROLE", "")) == "OPT-PARTICIPANT":
+            entry["optional"] = True
+        out.append(entry)
+    return out
+
+
+def _my_status(vevent):
+    """The user's own PARTSTAT — the attendee the API export marked as self."""
+    for prop in _attendee_props(vevent):
+        params = prop.params
+        if str(params.get("X-GOOGLE-SELF", "")).upper() == "TRUE":
+            return str(params["PARTSTAT"]) if params.get("PARTSTAT") else None
+    return None
+
+
+def _conference_entries(vevent):
+    raw = vevent.get("X-GOOGLE-CONFERENCE-ENTRY")
+    if raw is None:
+        return []
+    out = []
+    for prop in raw if isinstance(raw, list) else [raw]:
+        entry = {"uri": str(prop), "type": str(prop.params["TYPE"])}
+        if prop.params.get("LABEL"):
+            entry["label"] = str(prop.params["LABEL"])
+        out.append(entry)
+    return out
+
+
+def _attachments(vevent):
+    raw = vevent.get("ATTACH")
+    if raw is None:
+        return []
+    out = []
+    for prop in raw if isinstance(raw, list) else [raw]:
+        entry = {"url": str(prop)}
+        params = getattr(prop, "params", {})
+        if params.get("FILENAME"):
+            entry["title"] = str(params["FILENAME"])
+        out.append(entry)
+    return out
 
 
 def _categories(vevent):

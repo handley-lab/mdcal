@@ -157,10 +157,12 @@ def export_ics(credentials, calendar_id):
 
     Pages are fetched to exhaustion BEFORE any VCALENDAR is built: a failed
     page raises (crash-on-drift) rather than handing ``--prune`` a partial
-    identity set that would mass-delete the unfetched remainder. This is a
-    VEVENT subset synthesized from the Google event resource (uid, times,
-    recurrence, status, sequence, organizer/attendees, timestamps) — not raw
-    ICS byte/param fidelity; raw ICS stays the reference for URL feeds.
+    identity set that would mass-delete the unfetched remainder. The
+    synthesis is FULL-FIDELITY over the Google Events resource: every field
+    is mapped to an ICS property/param or deliberately excluded per
+    `COMPLETENESS`, and `_known` crashes on anything outside that table, so
+    a Google schema addition fails the sync loudly instead of silently
+    dropping data. Raw ICS stays the reference for URL feeds.
 
     Args:
         credentials: A ``google.oauth2.credentials.Credentials``.
@@ -216,6 +218,148 @@ def export_ics(credentials, calendar_id):
     return cal.to_ical().decode()
 
 
+COMPLETENESS = {
+    "event": (
+        frozenset({
+            "id", "iCalUID", "status", "summary", "description", "location",
+            "start", "end", "recurrence", "recurringEventId",
+            "originalStartTime", "transparency", "visibility", "sequence",
+            "attendees", "attendeesOmitted", "organizer", "creator",
+            "created", "updated", "htmlLink", "colorId", "hangoutLink",
+            "conferenceData", "reminders", "attachments",
+            "extendedProperties", "eventType", "guestsCanModify",
+            "guestsCanInviteOthers", "guestsCanSeeOtherGuests",
+            "anyoneCanAddSelf", "source", "workingLocationProperties",
+            "outOfOfficeProperties", "focusTimeProperties",
+            "birthdayProperties",
+        }),
+        frozenset({
+            "kind", "etag",
+            "endTimeUnspecified",
+            "privateCopy", "locked",
+            "gadget",
+        }),
+    ),
+    "time": (frozenset({"date", "dateTime", "timeZone"}), frozenset()),
+    "person": (
+        frozenset({"email"}),
+        frozenset({"displayName", "self", "id"}),
+    ),
+    "attendee": (
+        frozenset({
+            "email", "displayName", "responseStatus", "optional", "resource",
+            "additionalGuests", "self", "comment",
+        }),
+        frozenset({"organizer", "id"}),
+    ),
+    "conferenceData": (
+        frozenset({"entryPoints", "conferenceSolution", "conferenceId", "notes"}),
+        frozenset({"createRequest", "signature", "parameters"}),
+    ),
+    "conference entry point": (
+        frozenset({
+            "entryPointType", "uri", "label", "pin", "accessCode",
+            "meetingCode", "passcode", "password", "regionCode",
+        }),
+        frozenset(),
+    ),
+    "conference solution": (
+        frozenset({"name"}),
+        frozenset({"key", "iconUri"}),
+    ),
+    "attachment": (
+        frozenset({"fileUrl", "title", "mimeType", "fileId"}),
+        frozenset({"iconLink"}),
+    ),
+    "reminders": (frozenset({"useDefault", "overrides"}), frozenset()),
+    "reminder override": (frozenset({"method", "minutes"}), frozenset()),
+    "source": (frozenset({"url", "title"}), frozenset()),
+}
+"""The Google Events resource, exhaustively: every field mapped or excluded.
+
+The audit artifact for "are we capturing everything Google stores". Each
+entry is ``(mapped, excluded)``; `_known` crashes on any field outside the
+union, so a Google schema addition turns the hourly sync red instead of
+silently dropping data — the fix is a one-line entry here plus its mapping.
+
+Exclusion rationales:
+    event.kind/etag: transport artifacts, not event content.
+    event.endTimeUnspecified: derivable from start/end.
+    event.privateCopy/locked: server-side ACL state, not event content.
+    event.gadget: deprecated by Google.
+    person.displayName/self/id: organizer/creator identity is the email;
+        the rest is directory display and ACL plumbing.
+    attendee.organizer: derivable from the top-level ORGANIZER property.
+    attendee.id: profile-directory plumbing.
+    conferenceData.createRequest/signature/parameters: conference-request
+        lifecycle plumbing, not the conference itself.
+    conference solution.key/iconUri: service branding; the solution ``name``
+        is the content.
+    attachment.iconLink: display plumbing derivable from the file.
+
+Structures carried VERBATIM as compact JSON need no nested entry — the
+whole bag is preserved by construction: extendedProperties and the
+eventType property bags (workingLocation/outOfOffice/focusTime/birthday).
+
+reminders.useDefault=true is represented by ABSENCE (calendar-level
+default, not event content); useDefault=false renders each override, or
+``X-GOOGLE-REMINDERS:NONE`` when there are none — reminders explicitly off
+is event content and must stay distinguishable from the default.
+
+attendeesOmitted renders as ``X-GOOGLE-ATTENDEES-OMITTED:TRUE``: the
+captured attendee list is INCOMPLETE (Google caps served guest lists) —
+consumers must never treat it as the full invite list.
+
+visibility=default emits no CLASS (RFC 5545 has no DEFAULT token) and is
+excluded as calendar-default; CLASS is capture/display-only for web edits.
+"""
+
+_STATUS = {"confirmed": "CONFIRMED", "tentative": "TENTATIVE", "cancelled": "CANCELLED"}
+_PARTSTAT = {
+    "accepted": "ACCEPTED",
+    "declined": "DECLINED",
+    "tentative": "TENTATIVE",
+    "needsAction": "NEEDS-ACTION",
+}
+_CLASS = {"public": "PUBLIC", "private": "PRIVATE", "confidential": "CONFIDENTIAL"}
+_TRANSP = {"opaque": "OPAQUE", "transparent": "TRANSPARENT"}
+_BAGS = {
+    "workingLocationProperties": "X-GOOGLE-WORKING-LOCATION-PROPS",
+    "outOfOfficeProperties": "X-GOOGLE-OUT-OF-OFFICE-PROPS",
+    "focusTimeProperties": "X-GOOGLE-FOCUS-TIME-PROPS",
+    "birthdayProperties": "X-GOOGLE-BIRTHDAY-PROPS",
+}
+_GUEST_FLAGS = (
+    "guestsCanModify",
+    "guestsCanInviteOthers",
+    "guestsCanSeeOtherGuests",
+    "anyoneCanAddSelf",
+)
+
+
+def _known(obj, context):
+    """Crash on any Google resource field outside the completeness table."""
+    mapped, excluded = COMPLETENESS[context]
+    unknown = set(obj) - mapped - excluded
+    if unknown:
+        raise ValueError(
+            f"unmapped Google {context} field(s) {sorted(unknown)}: "
+            "map or exclude them in mdcal.gcal.COMPLETENESS"
+        )
+
+
+def _enum(value, mapping, context):
+    """Map an enumerated Google value, crashing on an unknown one."""
+    try:
+        return mapping[value]
+    except KeyError:
+        raise ValueError(f"unknown Google {context}: {value!r}") from None
+
+
+def _compact(value):
+    return _json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
 def _gtime(gtime, tz):
     """A Google start/end/originalStartTime → (value, is_date).
 
@@ -226,17 +370,19 @@ def _gtime(gtime, tz):
     own — they can differ, and mddb's identity is the serialised string), while
     ``DTSTART``/``DTEND`` pass the point's own zone or the calendar default.
     """
+    _known(gtime, "time")
     if "date" in gtime:
         return _dt.date.fromisoformat(gtime["date"]), True
     return _rfc3339(gtime["dateTime"]).astimezone(ZoneInfo(tz)), False
 
 
 def _item_to_vevent(item, excluded, default_tz, master_zone, calendar_id):
+    _known(item, "event")
     vevent = icalendar.Event()
     vevent.add("UID", item["iCalUID"])
     vevent.add("DTSTAMP", _dt.datetime.now(_dt.timezone.utc))
     vevent.add("SUMMARY", item.get("summary", ""))
-    vevent.add("STATUS", item["status"].upper())
+    vevent.add("STATUS", _enum(item["status"], _STATUS, "event status"))
     vevent.add("SEQUENCE", item.get("sequence", 0))
 
     start, all_day = _gtime(item["start"], item["start"].get("timeZone", default_tz))
@@ -254,11 +400,14 @@ def _item_to_vevent(item, excluded, default_tz, master_zone, calendar_id):
         vevent.add("RECURRENCE-ID", rid)
 
     if item.get("transparency"):
-        vevent.add("TRANSP", item["transparency"].upper())
+        vevent.add("TRANSP", _enum(item["transparency"], _TRANSP, "transparency"))
+    if item.get("visibility", "default") != "default":
+        vevent.add("CLASS", _enum(item["visibility"], _CLASS, "visibility"))
     if item.get("location"):
         vevent.add("LOCATION", item["location"])
     if item.get("description"):
         vevent.add("DESCRIPTION", item["description"])
+
     conference = item.get("hangoutLink") or next(
         (
             entry["uri"]
@@ -269,11 +418,110 @@ def _item_to_vevent(item, excluded, default_tz, master_zone, calendar_id):
     )
     if conference:
         vevent.add("X-GOOGLE-CONFERENCE", conference)
-    if item.get("organizer", {}).get("email"):
-        vevent.add("ORGANIZER", f"mailto:{item['organizer']['email']}")
+    data = item.get("conferenceData")
+    if data:
+        _known(data, "conferenceData")
+        for entry in data.get("entryPoints", []):
+            _known(entry, "conference entry point")
+            params = {"TYPE": entry["entryPointType"]}
+            for key, param in (
+                ("label", "LABEL"),
+                ("pin", "PIN"),
+                ("accessCode", "ACCESS-CODE"),
+                ("meetingCode", "MEETING-CODE"),
+                ("passcode", "PASSCODE"),
+                ("password", "PASSWORD"),
+                ("regionCode", "REGION-CODE"),
+            ):
+                if entry.get(key):
+                    params[param] = entry[key]
+            vevent.add("X-GOOGLE-CONFERENCE-ENTRY", entry["uri"], parameters=params)
+        if data.get("conferenceId"):
+            vevent.add("X-GOOGLE-CONFERENCE-ID", data["conferenceId"])
+        if data.get("notes"):
+            vevent.add("X-GOOGLE-CONFERENCE-NOTES", data["notes"])
+        if data.get("conferenceSolution"):
+            _known(data["conferenceSolution"], "conference solution")
+            vevent.add(
+                "X-GOOGLE-CONFERENCE-SOLUTION", data["conferenceSolution"]["name"]
+            )
+
+    organizer = item.get("organizer", {})
+    if organizer:
+        _known(organizer, "person")
+    if organizer.get("email"):
+        vevent.add("ORGANIZER", f"mailto:{organizer['email']}")
+    creator = item.get("creator", {})
+    if creator:
+        _known(creator, "person")
+    if creator.get("email") and creator.get("email") != organizer.get("email"):
+        vevent.add("X-GOOGLE-CREATOR", creator["email"])
+
     for attendee in item.get("attendees", []):
-        if attendee.get("email"):
-            vevent.add("ATTENDEE", f"mailto:{attendee['email']}")
+        _known(attendee, "attendee")
+        address = icalendar.vCalAddress(f"mailto:{attendee['email']}")
+        if attendee.get("displayName"):
+            address.params["CN"] = attendee["displayName"]
+        if "responseStatus" in attendee:
+            address.params["PARTSTAT"] = _enum(
+                attendee["responseStatus"], _PARTSTAT, "attendee responseStatus"
+            )
+        if attendee.get("optional"):
+            address.params["ROLE"] = "OPT-PARTICIPANT"
+        if attendee.get("resource"):
+            address.params["CUTYPE"] = "RESOURCE"
+        if attendee.get("additionalGuests"):
+            address.params["X-NUM-GUESTS"] = str(attendee["additionalGuests"])
+        if attendee.get("self"):
+            address.params["X-GOOGLE-SELF"] = "TRUE"
+        if attendee.get("comment"):
+            address.params["X-GOOGLE-COMMENT"] = attendee["comment"]
+        vevent.add("ATTENDEE", address, encode=0)
+    if item.get("attendeesOmitted"):
+        vevent.add("X-GOOGLE-ATTENDEES-OMITTED", "TRUE")
+
+    for attachment in item.get("attachments", []):
+        _known(attachment, "attachment")
+        params = {}
+        if attachment.get("mimeType"):
+            params["FMTTYPE"] = attachment["mimeType"]
+        if attachment.get("title"):
+            params["FILENAME"] = attachment["title"]
+        if attachment.get("fileId"):
+            params["X-GOOGLE-FILE-ID"] = attachment["fileId"]
+        vevent.add("ATTACH", attachment["fileUrl"], parameters=params)
+
+    reminders = item.get("reminders")
+    if reminders:
+        _known(reminders, "reminders")
+        if not reminders.get("useDefault", False):
+            overrides = reminders.get("overrides", [])
+            for override in overrides:
+                _known(override, "reminder override")
+                vevent.add(
+                    "X-GOOGLE-REMINDER", f"{override['method']},{override['minutes']}"
+                )
+            if not overrides:
+                vevent.add("X-GOOGLE-REMINDERS", "NONE")
+
+    if item.get("colorId"):
+        vevent.add("X-GOOGLE-COLOR-ID", item["colorId"])
+    flags = {key: item[key] for key in _GUEST_FLAGS if key in item}
+    if flags:
+        vevent.add("X-GOOGLE-GUESTS-CAN", _compact(flags))
+    if item.get("extendedProperties"):
+        vevent.add("X-GOOGLE-EXTENDED-PROPS", _compact(item["extendedProperties"]))
+    if item.get("eventType", "default") != "default":
+        vevent.add("X-GOOGLE-EVENT-TYPE", item["eventType"])
+    for key, prop in _BAGS.items():
+        if key in item:
+            vevent.add(prop, _compact(item[key]))
+    source = item.get("source")
+    if source:
+        _known(source, "source")
+        params = {"TITLE": source["title"]} if source.get("title") else {}
+        vevent.add("X-GOOGLE-SOURCE", source["url"], parameters=params)
+
     vevent.add("CREATED", _rfc3339(item["created"]))
     vevent.add("LAST-MODIFIED", _rfc3339(item["updated"]))
     # Provenance back to the Google source: the event id, the calendar it came
