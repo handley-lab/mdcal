@@ -233,6 +233,10 @@ def test_reminders_three_states(monkeypatch):
 def test_attendees_omitted_flag(monkeypatch):
     vevent = _export({**FULL, "attendeesOmitted": True}, monkeypatch)
     assert str(vevent["X-GOOGLE-ATTENDEES-OMITTED"]) == "TRUE"
+    card = vevent_to_card(vevent, "probe")
+    assert card.yaml["attendees_omitted"] is True
+    plain = vevent_to_card(_export(FULL, monkeypatch), "probe")
+    assert "attendees_omitted" not in plain.yaml
 
 
 def test_visibility_default_emits_no_class(monkeypatch):
@@ -289,6 +293,29 @@ def test_canary_unknown_nested_fields(monkeypatch):
     with pytest.raises(ValueError, match="unmapped Google time"):
         _export(
             {**FULL, "start": {"dateTime": "2026-09-01T10:00:00Z", "lunar": True}},
+            monkeypatch,
+        )
+    with pytest.raises(ValueError, match="unmapped Google conferenceData"):
+        _export({**FULL, "conferenceData": {"holograms": True}}, monkeypatch)
+    with pytest.raises(ValueError, match="unmapped Google conference solution"):
+        _export(
+            {
+                **FULL,
+                "conferenceData": {
+                    "conferenceSolution": {"name": "Meet", "tier": "pro"}
+                },
+            },
+            monkeypatch,
+        )
+    with pytest.raises(ValueError, match="unmapped Google reminder override"):
+        _export(
+            {
+                **FULL,
+                "reminders": {
+                    "useDefault": False,
+                    "overrides": [{"method": "popup", "minutes": 5, "tone": "chime"}],
+                },
+            },
             monkeypatch,
         )
 
