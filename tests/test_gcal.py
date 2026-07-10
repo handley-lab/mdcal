@@ -389,3 +389,91 @@ def test_export_ics_skips_skeletal_cancelled_tombstones(monkeypatch):
         icalendar.Calendar.from_ical(gcal.export_ics(None, "cal")).walk("VEVENT")
     )
     assert [str(v["UID"]) for v in vevents] == ["a@x"]
+
+
+class _Recorder:
+    def __init__(self, list_items, instance_items):
+        self.list_items = list_items
+        self.instance_items = instance_items
+        self.patched = None
+
+    def events(self):
+        return self
+
+    def list(self, **kw):
+        return _Result({"items": self.list_items})
+
+    def instances(self, **kw):
+        self.instances_kw = kw
+        return _Result({"items": self.instance_items})
+
+    def patch(self, **kw):
+        self.patched = kw
+        return _Result({"updated": "2026-07-10T09:00:00.500Z"})
+
+
+class _Result:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self):
+        return self.payload
+
+
+def test_patch_instance_patches_the_matching_slot(monkeypatch):
+    from mdcal import gcal
+
+    card = _card(
+        "UID:series@x\nSUMMARY:Supervision\n"
+        "DTSTART;TZID=Europe/London:20260709T103000\n"
+        "DTEND;TZID=Europe/London:20260709T110000\nSTATUS:CONFIRMED"
+    )
+    recorder = _Recorder(
+        list_items=[
+            {"id": "inst1", "recurringEventId": "m1", "status": "confirmed"},
+            {"id": "m1", "status": "confirmed"},
+        ],
+        instance_items=[{"id": "m1_20260709T130000Z"}],
+    )
+    monkeypatch.setattr(gcal, "_service", lambda credentials: recorder)
+    slot = dt.datetime(2026, 7, 9, 14, 0, tzinfo=dt.timezone(dt.timedelta(hours=1)))
+    dispatched = gcal.patch_instance(None, "cal@x", "series@x", slot, card)
+    assert recorder.instances_kw["eventId"] == "m1"
+    assert recorder.instances_kw["originalStart"] == "2026-07-09T14:00:00+01:00"
+    assert recorder.instances_kw["showDeleted"] is True
+    assert recorder.patched["eventId"] == "m1_20260709T130000Z"
+    body = recorder.patched["body"]
+    assert body["status"] == "confirmed"
+    assert body["start"]["dateTime"] == "2026-07-09T10:30:00+01:00"
+    assert "sequence" not in body and "recurrence" not in body
+    assert dispatched == dt.datetime(2026, 7, 10, 9, 0, 0, tzinfo=dt.timezone.utc)
+
+
+def test_patch_instance_no_master_raises(monkeypatch):
+    from mdcal import gcal
+
+    card = _card(
+        "UID:gone@x\nSUMMARY:S\nDTSTART;TZID=Europe/London:20260709T103000\n"
+        "DTEND;TZID=Europe/London:20260709T110000\nSTATUS:CONFIRMED"
+    )
+    recorder = _Recorder(
+        list_items=[{"id": "m1", "status": "cancelled"}], instance_items=[]
+    )
+    monkeypatch.setattr(gcal, "_service", lambda credentials: recorder)
+    with pytest.raises(ValueError, match="no live Google master"):
+        gcal.patch_instance(None, "cal@x", "gone@x", dt.date(2026, 7, 9), card)
+
+
+def test_patch_instance_no_slot_raises(monkeypatch):
+    from mdcal import gcal
+
+    card = _card(
+        "UID:series@x\nSUMMARY:S\nDTSTART;TZID=Europe/London:20260709T103000\n"
+        "DTEND;TZID=Europe/London:20260709T110000\nSTATUS:CONFIRMED"
+    )
+    recorder = _Recorder(
+        list_items=[{"id": "m1", "status": "confirmed"}], instance_items=[]
+    )
+    monkeypatch.setattr(gcal, "_service", lambda credentials: recorder)
+    with pytest.raises(ValueError, match="no instance of"):
+        gcal.patch_instance(None, "cal@x", "series@x", dt.date(2026, 7, 9), card)

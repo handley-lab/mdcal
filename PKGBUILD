@@ -14,14 +14,15 @@ package() {
   local purelib
   purelib=$(env -u VIRTUAL_ENV PATH=/usr/bin:/bin \
     python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-  install -Dm644 src/mdcal/__init__.py "$pkgdir/$purelib/mdcal/__init__.py"
-  install -Dm644 src/mdcal/ics.py      "$pkgdir/$purelib/mdcal/ics.py"
-  install -Dm644 src/mdcal/window.py   "$pkgdir/$purelib/mdcal/window.py"
-  install -Dm644 src/mdcal/gcal.py     "$pkgdir/$purelib/mdcal/gcal.py"
+  for f in src/mdcal/*.py; do
+    install -Dm644 "$f" "$pkgdir/$purelib/mdcal/$(basename "$f")"
+  done
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -dm755 "$pkgdir/usr/bin"
-  printf '#!/usr/bin/env python\nfrom mdcal.ics import main\nmain()\n' > "$pkgdir/usr/bin/mdcal-import"
+  printf '#!/usr/bin/python\nfrom mdcal.ics import main\nmain()\n' > "$pkgdir/usr/bin/mdcal-import"
   chmod 755 "$pkgdir/usr/bin/mdcal-import"
-  printf '#!/usr/bin/env python\nfrom mdcal.gcal import main\nmain()\n' > "$pkgdir/usr/bin/mdcal-pull"
+  printf '#!/usr/bin/python\nfrom mdcal.gcal import main\nmain()\n' > "$pkgdir/usr/bin/mdcal-pull"
   chmod 755 "$pkgdir/usr/bin/mdcal-pull"
+  printf '#!/usr/bin/python\nfrom mdcal.imip import main\nmain()\n' > "$pkgdir/usr/bin/mdcal-reply"
+  chmod 755 "$pkgdir/usr/bin/mdcal-reply"
 }
