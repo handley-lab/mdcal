@@ -704,6 +704,21 @@ _ENTRY_PARAMS = (
 )
 
 
+def _conference_solution_for(uri):
+    """The conferenceSolution a bare join URI implies.
+
+    Google drops entryPoints without a conferenceSolution (live-probed), so
+    a link captured without one — Google's own feed exports and
+    pre-enrichment cards — earns the solution its URI states: a meet URI IS
+    Google Meet; anything else uses Google's generic ``addOn`` type, which
+    round-trips verbatim (probed with a Zoom URI).
+    """
+    host = _urlsplit(uri).netloc
+    if host == "meet.google.com":
+        return {"name": "Google Meet", "key": {"type": "hangoutsMeet"}}
+    return {"name": host or uri, "key": {"type": "addOn"}}
+
+
 def _enrichment_body(vevent):
     """Fence enrichment properties → Google API fields, the capture inverse.
 
@@ -765,22 +780,19 @@ def _enrichment_body(vevent):
             solution = {"name": str(solutions[0])}
             if solutions[0].params.get("X-GOOGLE-KEY-TYPE"):
                 solution["key"] = {"type": str(solutions[0].params["X-GOOGLE-KEY-TYPE"])}
-            conference["conferenceSolution"] = solution
+        else:
+            video = next(
+                (p["uri"] for p in points if p["entryPointType"] == "video"),
+                points[0]["uri"],
+            )
+            solution = _conference_solution_for(video)
+        conference["conferenceSolution"] = solution
         body["conferenceData"] = conference
     elif vevent.get("X-GOOGLE-CONFERENCE"):
-        # A bare join link (what Google's own feed exports and pre-enrichment
-        # cards carry). Google drops entryPoints without a conferenceSolution
-        # (live-probed), so synthesize the one the URI implies: meet URIs ARE
-        # Google Meet; anything else uses Google's generic addOn type, which
-        # round-trips verbatim (probed with a Zoom URI).
         uri = str(vevent["X-GOOGLE-CONFERENCE"])
-        if "meet.google.com" in uri:
-            solution = {"name": "Google Meet", "key": {"type": "hangoutsMeet"}}
-        else:
-            solution = {"name": _urlsplit(uri).netloc or uri, "key": {"type": "addOn"}}
         body["conferenceData"] = {
             "entryPoints": [{"entryPointType": "video", "uri": uri}],
-            "conferenceSolution": solution,
+            "conferenceSolution": _conference_solution_for(uri),
         }
 
     attachments = []

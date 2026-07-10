@@ -182,6 +182,22 @@ def test_push_import_synthesizes_conference_from_bare_link(monkeypatch):
     }
 
 
+def test_push_import_synthesizes_solution_for_structured_entries(monkeypatch):
+    service = _PushService(listed=[])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: service)
+    gcal.push_event(
+        None,
+        "cal",
+        _card(BARE + "\nX-GOOGLE-CONFERENCE-ENTRY;TYPE=video:https://zoom.us/j/123"),
+    )
+    ((body, kwargs),) = service.imports
+    assert kwargs == {"conferenceDataVersion": 1}
+    assert body["conferenceData"]["conferenceSolution"] == {
+        "name": "zoom.us",
+        "key": {"type": "addOn"},
+    }
+
+
 def test_push_import_reminders_none_state(monkeypatch):
     service = _PushService(listed=[])
     monkeypatch.setattr(gcal, "_service", lambda credentials: service)
