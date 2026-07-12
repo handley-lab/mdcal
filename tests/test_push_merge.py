@@ -200,6 +200,18 @@ def test_push_import_synthesizes_solution_for_structured_entries(monkeypatch):
     }
 
 
+def test_push_import_carries_source(monkeypatch):
+    service = _PushService(listed=[])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: service)
+    gcal.push_event(
+        None,
+        "cal",
+        _card(BARE + "\nX-GOOGLE-SOURCE;TITLE=Ticket:https://example.org/t"),
+    )
+    ((body, _),) = service.imports
+    assert body["source"] == {"url": "https://example.org/t", "title": "Ticket"}
+
+
 def test_push_import_reminders_none_state(monkeypatch):
     service = _PushService(listed=[])
     monkeypatch.setattr(gcal, "_service", lambda credentials: service)
