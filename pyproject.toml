@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mdcal"
-version = "0.0.7"
+version = "0.0.8"
 description = "An mddb-backed personal calendar"
 readme = "README.md"
 requires-python = ">=3.10"
