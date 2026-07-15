@@ -414,14 +414,17 @@ def _meeting_links(vevent):
     URLs scraped from the description HTML, which are included ONLY when the
     host matches a known provider (a description is full of non-meeting links;
     a conference entry is not). Deduped by normalised (scheme, host, path,
-    query); the stored url is HTML-unescaped and trailing-punctuation-trimmed
-    so it is clickable and its Zoom ``pwd=`` query survives.
+    query); the stored url is HTML-unescaped. Trailing punctuation is trimmed
+    ONLY from bare-text description matches (prose runs a URL into `.`/`)`),
+    never from an authoritative structured conference value.
     """
     seen = set()
     out = []
 
-    def add(url, allow_unknown):
-        clean = url.strip().rstrip(".,)]\"'")
+    def add(url, allow_unknown, trim):
+        clean = url.strip()
+        if trim:
+            clean = clean.rstrip(".,)]\"'")
         provider = _provider_of(clean)
         if provider is None and not allow_unknown:
             return
@@ -440,13 +443,13 @@ def _meeting_links(vevent):
     entries = vevent.get("X-GOOGLE-CONFERENCE-ENTRY")
     for prop in entries if isinstance(entries, list) else [entries] if entries else []:
         if str(prop.params.get("TYPE", "")) == "video":
-            add(str(prop), True)
+            add(str(prop), True, False)
     if vevent.get("X-GOOGLE-CONFERENCE"):
-        add(str(vevent["X-GOOGLE-CONFERENCE"]), True)
+        add(str(vevent["X-GOOGLE-CONFERENCE"]), True, False)
 
     description = str(vevent["DESCRIPTION"]) if vevent.get("DESCRIPTION") else ""
     for match in _URL_RE.findall(html.unescape(description)):
-        add(match, False)
+        add(match, False, True)
 
     return out
 

@@ -100,9 +100,16 @@ def test_no_link_leaves_field_absent():
     assert "meeting_links" not in _card("DESCRIPTION:just a note").yaml
 
 
-def test_trailing_punctuation_trimmed():
+def test_trailing_punctuation_trimmed_from_description_only():
     (link,) = _links("DESCRIPTION:join (https://zoom.us/j/5).")
     assert link["url"] == "https://zoom.us/j/5"
+
+
+def test_structured_url_punctuation_preserved():
+    # a structured conference value is authoritative — not prose to clean
+    assert _links(
+        "X-GOOGLE-CONFERENCE-ENTRY;TYPE=video:https://jitsi.example/room)"
+    ) == [{"url": "https://jitsi.example/room)", "provider": "Meeting"}]
 
 
 def test_meeting_links_card_reparses():
