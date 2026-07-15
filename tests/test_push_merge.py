@@ -98,6 +98,18 @@ def test_push_patches_existing_with_clearing_forms(monkeypatch):
         assert google_owned not in body
 
 
+def test_push_patch_sends_description_untrimmed(monkeypatch):
+    # A synced title-only save must not trim the HTML description on Google:
+    # the patch body carries the exact raw source, whitespace and all.
+    card = _card(BARE)
+    card.body = "  <b>Agenda</b> below \n\n" + card.body
+    service = _PushService(listed=[{"id": "g1", "status": "confirmed"}])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: service)
+    gcal.push_event(None, "cal", card)
+    ((_, body),) = service.patches
+    assert body["description"] == "  <b>Agenda</b> below "
+
+
 def test_push_patch_skips_cancelled_and_instance_siblings(monkeypatch):
     service = _PushService(
         listed=[

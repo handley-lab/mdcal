@@ -29,6 +29,8 @@ from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from mdcal.ics import description_of
+
 _TIMEOUT = 10
 """Seconds before a Google HTTP call fails rather than hanging its caller.
 
@@ -698,8 +700,7 @@ def _fields_body(card):
         }
         body["end"] = {"dateTime": yaml["dtend"].isoformat(), "timeZone": yaml["tzid"]}
     body["location"] = yaml.get("location") or None
-    description = card.body.split("```ics", 1)[0].strip()
-    body["description"] = description or None
+    body["description"] = description_of(card.body) or None
     return body
 
 
