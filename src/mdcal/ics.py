@@ -11,7 +11,9 @@ import collections
 import datetime as _dt
 from zoneinfo import ZoneInfo
 import hashlib
+import html
 import re
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +49,7 @@ EVENT_KEYS = (
     "my_status",
     "conference",
     "conference_url",
+    "meeting_links",
     "attachments",
     "created",
     "last_modified",
@@ -311,6 +314,7 @@ def vevent_to_card(vevent, source):
         "conference_url": str(vevent["X-GOOGLE-CONFERENCE"])
         if vevent.get("X-GOOGLE-CONFERENCE")
         else None,
+        "meeting_links": _meeting_links(vevent) or None,
         "attachments": _attachments(vevent) or None,
         "gcal_id": str(vevent["X-GOOGLE-EVENT-ID"])
         if vevent.get("X-GOOGLE-EVENT-ID")
@@ -355,6 +359,99 @@ def vevent_to_card(vevent, source):
         yaml=yaml,
         relpath=_relpath(source, uid, recurrence_id, title, dtstart),
     )
+
+
+def description_of(body):
+    """The card's description: the body text before the fenced VEVENT.
+
+    The single authority for pulling a description back out of a card body,
+    shared by every write path (grid edit, Google patch/import, override
+    reset). Exact by construction: `vevent_to_card` appends exactly one blank
+    line after a non-empty description before the fence, so this drops only
+    that pair and an untouched description round-trips byte-for-byte. Never
+    ``.strip()``/``.rstrip`` — trimming here re-serialises a whitespace-shorn
+    ``DESCRIPTION`` back to Google, which the feed then re-imports.
+
+    Raises:
+        ValueError: The body has no fenced VEVENT (crash-on-drift).
+    """
+    prefix, sep, _ = body.partition("```ics\n")
+    if not sep:
+        raise ValueError("card body lacks a fenced VEVENT")
+    return prefix[:-2] if prefix.endswith("\n\n") else prefix
+
+
+_MEETING_PROVIDERS = (
+    ("meet.google.com", "Google Meet"),
+    ("zoom.us", "Zoom"),
+    ("teams.microsoft.com", "Teams"),
+    ("teams.live.com", "Teams"),
+    ("webex.com", "Webex"),
+)
+"""Video-conferencing host suffixes → display provider. Matched on the parsed
+host as an exact host or a dotted suffix, never a substring, so a lookalike
+like ``zoom.us.evil.example`` is rejected."""
+
+_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+
+def _provider_of(url):
+    """Conferencing provider for a URL, or ``None`` if no provider host matches."""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    for suffix, label in _MEETING_PROVIDERS:
+        if host == suffix or host.endswith("." + suffix):
+            return label
+    return None
+
+
+def _meeting_links(vevent):
+    """The event's video-meeting links, deduped, as ``{url, provider}`` dicts.
+
+    Unions the two places a join link hides: the authoritative structured
+    conference (``X-GOOGLE-CONFERENCE-ENTRY;TYPE=video`` + the bare
+    ``X-GOOGLE-CONFERENCE``), which is ALWAYS carried — an unknown host gets
+    the generic ``Meeting`` label rather than being dropped — and provider-host
+    URLs scraped from the description HTML, which are included ONLY when the
+    host matches a known provider (a description is full of non-meeting links;
+    a conference entry is not). Deduped by normalised (scheme, host, path,
+    query); the stored url is HTML-unescaped. Trailing punctuation is trimmed
+    ONLY from bare-text description matches (prose runs a URL into `.`/`)`),
+    never from an authoritative structured conference value.
+    """
+    seen = set()
+    out = []
+
+    def add(url, allow_unknown, trim):
+        clean = url.strip()
+        if trim:
+            clean = clean.rstrip(".,)]\"'")
+        provider = _provider_of(clean)
+        if provider is None and not allow_unknown:
+            return
+        parts = urllib.parse.urlsplit(clean)
+        key = (
+            parts.scheme.lower(),
+            (parts.hostname or "").lower(),
+            parts.path,
+            parts.query,
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"url": clean, "provider": provider or "Meeting"})
+
+    entries = vevent.get("X-GOOGLE-CONFERENCE-ENTRY")
+    for prop in entries if isinstance(entries, list) else [entries] if entries else []:
+        if str(prop.params.get("TYPE", "")) == "video":
+            add(str(prop), True, False)
+    if vevent.get("X-GOOGLE-CONFERENCE"):
+        add(str(vevent["X-GOOGLE-CONFERENCE"]), True, False)
+
+    description = str(vevent["DESCRIPTION"]) if vevent.get("DESCRIPTION") else ""
+    for match in _URL_RE.findall(html.unescape(description)):
+        add(match, False, True)
+
+    return out
 
 
 def _attendees(vevent):
