@@ -1,5 +1,6 @@
 import datetime as dt
 import re
+import subprocess
 
 import icalendar
 import mddb
@@ -367,6 +368,32 @@ def test_reimport_with_churned_dtstamp_is_noop(ics_sample, tmp_path):
     assert mddb.MDDB(deck).head() == head
 
 
+def test_import_is_one_commit_pinned_to_read_base(ics_sample, tmp_path):
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    head_after_first = mddb.MDDB(deck).head()
+    plain = ics_sample[
+        ics_sample.index("BEGIN:VEVENT") : ics_sample.index("END:VEVENT")
+        + len("END:VEVENT\n")
+    ]
+    churned = ics_sample.replace(plain, "").replace(
+        "SUMMARY:Conference trip", "SUMMARY:Conference trip renamed"
+    )
+    ics.write_text(churned)
+    counts = import_ics(deck, str(ics), "research", prune=True)
+    assert counts["updated"] == 1
+    assert counts["pruned"] == 1
+    log = subprocess.run(
+        ["git", "-C", deck, "rev-list", "--count", f"{head_after_first}..HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert log.stdout.strip() == "1"
+
+
 def test_prune_removes_absent(ics_sample, tmp_path):
     ics = tmp_path / "research.ics"
     ics.write_text(ics_sample)
@@ -398,7 +425,7 @@ def test_prune_spares_local_and_other_sources(ics_sample, tmp_path):
                 "source": "local",
                 "uid": "l@x",
                 "all_day": False,
-                "status": "CONFIRMED",
+                "event_status": "CONFIRMED",
             },
             relpath="2024-01-01-local-abc.md",
         )

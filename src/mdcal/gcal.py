@@ -29,7 +29,7 @@ from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from mdcal.ics import description_of
+from mdcal.ics import description_of, fenced_vevent, fenced_vevent_text
 
 _TIMEOUT = 10
 """Seconds before a Google HTTP call fails rather than hanging its caller.
@@ -688,7 +688,7 @@ def _fields_body(card):
     yaml = card.yaml
     body = {
         "summary": card.title,
-        "status": _enum(yaml["status"], _GOOGLE_STATUS, "event status"),
+        "status": _enum(yaml["event_status"], _GOOGLE_STATUS, "event status"),
     }
     if yaml["all_day"]:
         body["start"] = {"date": yaml["dtstart"].isoformat()}
@@ -733,17 +733,12 @@ def _event_body(card):
         "iCalUID": yaml["uid"],
         "sequence": yaml["sequence"],
         **{k: v for k, v in _fields_body(card).items() if v is not None},
-        **_enrichment_body(_fence_event(card.body)),
+        **_enrichment_body(fenced_vevent(card.body)),
     }
     recurrence = _recurrence_lines(card.body)
     if recurrence:
         body["recurrence"] = recurrence
     return body
-
-
-def _fence_event(body):
-    fence = _re.search(r"```ics\n(.*?)\n```", body, _re.DOTALL).group(1)
-    return icalendar.Event.from_ical(fence)
 
 
 def _fence_props(vevent, name):
@@ -973,8 +968,7 @@ def patch_instance(credentials, calendar_id, uid, original_start, card):
 
 
 def _recurrence_lines(body):
-    fence = _re.search(r"```ics\n(.*?)\n```", body, _re.DOTALL).group(1)
-    unfolded = fence.replace("\n ", "")
+    unfolded = fenced_vevent_text(body).replace("\n ", "")
     return [
         line
         for line in unfolded.split("\n")

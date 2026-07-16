@@ -20,7 +20,7 @@ import yaml as _yaml
 from dateutil.rrule import rrulestr
 from mddb import Card
 
-from mdcal.ics import RECURRENCE_FOREVER_EPOCH, normalise_until
+from mdcal.ics import RECURRENCE_FOREVER_EPOCH, instant_epoch, normalise_until
 
 _LOADER = _yaml.CSafeLoader
 """The libyaml C SafeLoader for the resolver's hottest path.
@@ -65,30 +65,6 @@ class Occurrence:
     hidden: bool = False
 
 
-def _instant(value):
-    """Return the UTC-second epoch for a ``date`` or tz-aware ``datetime``.
-
-    Mirrors the importer's epoch convention so ``date`` and ``datetime`` values
-    compare uniformly: a ``date`` maps to its UTC-midnight epoch; a ``datetime``
-    must be tz-aware.
-
-    Args:
-        value: A ``datetime.date`` or tz-aware ``datetime.datetime``.
-
-    Returns:
-        Integer UTC-second epoch.
-
-    Raises:
-        ValueError: ``value`` is a naive ``datetime`` (no silent localisation).
-    """
-    if isinstance(value, _dt.datetime):
-        if value.tzinfo is None:
-            raise ValueError(f"naive datetime not supported: {value!r}")
-        return int(value.timestamp())
-    midnight = _dt.datetime(value.year, value.month, value.day, tzinfo=_dt.timezone.utc)
-    return int(midnight.timestamp())
-
-
 def _concrete(db, start_epoch, end_epoch, hide):
     rows = db.conn.execute(
         "SELECT e.yaml_text, e.body FROM entry_fields ds "
@@ -103,9 +79,9 @@ def _concrete(db, start_epoch, end_epoch, hide):
     out = []
     for yaml_text, body in rows:
         card = _card(yaml_text, body)
-        if card.yaml["status"] == "CANCELLED":
+        if card.yaml["event_status"] == "CANCELLED":
             continue
-        hidden = hide(card, _instant(card.yaml["dtstart"]))
+        hidden = hide(card, instant_epoch(card.yaml["dtstart"]))
         out.append(
             Occurrence(card, card.yaml["dtstart"], card.yaml["dtend"], False, hidden)
         )
@@ -214,7 +190,7 @@ def _masters(db, start_epoch, end_epoch):
 
 
 def _expand_master(card, start, end, start_epoch, end_epoch, suppression, hide):
-    if card.yaml["status"] == "CANCELLED":
+    if card.yaml["event_status"] == "CANCELLED":
         return []
     dtstart = card.yaml["dtstart"]
     duration = card.yaml["dtend"] - dtstart
@@ -226,7 +202,7 @@ def _expand_master(card, start, end, start_epoch, end_epoch, suppression, hide):
         else dtstart.astimezone(ZoneInfo(card.yaml["tzid"]))
     )
     rule = rrulestr(normalise_until(card.yaml["rrule"]), dtstart=anchor)
-    suppress = {_instant(d) for d in card.yaml.get("exdate", [])}
+    suppress = {instant_epoch(d) for d in card.yaml.get("exdate", [])}
     suppress |= suppression.get((card.yaml["source"], uid), set())
     out = []
     seen = set()
@@ -237,12 +213,14 @@ def _expand_master(card, start, end, start_epoch, end_epoch, suppression, hide):
     ]
     for occ in generated + rdates:
         occ_end = occ + duration
-        if not (_instant(occ) < end_epoch and _instant(occ_end) > start_epoch):
+        if not (
+            instant_epoch(occ) < end_epoch and instant_epoch(occ_end) > start_epoch
+        ):
             continue
-        if _instant(occ) in suppress or _instant(occ) in seen:
+        if instant_epoch(occ) in suppress or instant_epoch(occ) in seen:
             continue
-        seen.add(_instant(occ))
-        hidden = hide(card, _instant(occ))
+        seen.add(instant_epoch(occ))
+        hidden = hide(card, instant_epoch(occ))
         if all_day:
             out.append(Occurrence(card, occ.date(), occ_end.date(), True, hidden))
         else:
@@ -269,7 +247,7 @@ def events_in_window(db, start, end):
     Raises:
         ValueError: ``start`` or ``end`` is a naive ``datetime``.
     """
-    start_epoch, end_epoch = _instant(start), _instant(end)
+    start_epoch, end_epoch = instant_epoch(start), instant_epoch(end)
     hide = _hide_policy(db)
     occurrences = _concrete(db, start_epoch, end_epoch, hide)
     suppression = _suppression_map(db)

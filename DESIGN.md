@@ -46,7 +46,10 @@ primitives. Design choices must not paint that arc into a corner.
 
 Everything else is **flat layer YAML** modelled on VEVENT defaults, indexed by mddb's
 `entry_fields` and reached via raw SQL: `uid`, `dtstart`, `dtend`/`duration`, `dtstart_epoch`
-(UTC, for range queries), `tzid`, `all_day`, `rrule`, `status`, `transp`, `sequence`, `organizer`,
+(UTC, for range queries), `tzid`, `all_day`, `rrule`, `event_status` (the STORAGE name for
+iCalendar `STATUS`: the bare `status` key is GTD vocabulary, and one card may carry both
+vocabularies — the ICS property, the Google API field, and the nested attendee PARTSTAT all
+keep their external `status` names), `transp`, `sequence`, `organizer`,
 `location`, `source`. Structured iCal data (attendees, organizer) keeps a flat companion field for
 search (e.g. `attendee_emails: [...]`) alongside full fidelity; a **content-complete VEVENT
 serialisation is preserved** (body fence, via `icalendar.to_ical()` — every *event-content*
@@ -62,6 +65,17 @@ cancel — ever passes `tags=` again, so local classification (`area/*`, `mdcal/
 survives every upstream change. Outbound is symmetric: Google write-back builds its event
 body from uid/title/sequence/times/location/description/recurrence only — it never sends
 tags/`CATEGORIES` — so retagging never touches Google.
+
+**Composition contract.** Cards may carry several vocabularies at once (an event card may
+also hold GTD fields; a transcript record card holds reference content plus its own layer's
+keys). The rule that makes this safe: a vocabulary layer owns the *body*, *summary*, and its
+own frontmatter keys ONLY on cards **it** renders. mdcal renders exactly the cards it
+selects — feed imports by their `source`, web CRUD on `local`/synced sources — and its
+re-render strips exactly `EVENT_KEYS` (`mdcal.ics.apply_render`, the one implementation),
+preserving every foreign key verbatim. A card that carries no mdcal `source` key can never
+be selected by an mdcal writer, so other layers' cards are safe mechanically, not by
+convention. Composition across layers is therefore frontmatter-level: share the card,
+never the body.
 
 **`uid` (iCal) is a layer field, distinct from mddb `id`** (a substrate-owned UUIDv4). Imported and
 subscribed events carry an upstream `uid` preserved for sync-by-uid. mddb does **not** enforce `uid`

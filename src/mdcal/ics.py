@@ -34,7 +34,7 @@ EVENT_KEYS = (
     "dtend_epoch",
     "all_day",
     "tzid",
-    "status",
+    "event_status",
     "transp",
     "sequence",
     "rrule",
@@ -68,6 +68,12 @@ keys survive.
 creation, after which tags are deck-owned local classification — no re-render
 path may pass ``tags=`` to ``editor.update``, so retags (``area/*``,
 ``mdcal/hidden``) survive every upstream change.
+
+``event_status`` is the STORAGE name for iCalendar ``STATUS`` — the bare
+``status`` key belongs to the GTD vocabulary (mdgtd), and one card may carry
+both vocabularies. The external names are unchanged: the ICS property stays
+``STATUS``, the Google Events API field stays ``status``, and the nested
+attendee ``status`` (PARTSTAT) is display data, unindexed and unowned.
 """
 
 GRACE = _dt.timedelta(hours=1)
@@ -164,7 +170,7 @@ def _recurrence_end_epoch(rrule, dtstart, dtend, all_day, tzid, rdates=()):
     """
     if "COUNT=" not in rrule and "UNTIL=" not in rrule:
         return RECURRENCE_FOREVER_EPOCH
-    rdate_bound = max((_epoch(r) for r in rdates), default=None)
+    rdate_bound = max((instant_epoch(r) for r in rdates), default=None)
     anchor = (
         _dt.datetime(dtstart.year, dtstart.month, dtstart.day, tzinfo=_dt.timezone.utc)
         if all_day
@@ -172,7 +178,9 @@ def _recurrence_end_epoch(rrule, dtstart, dtend, all_day, tzid, rdates=()):
     )
     instances = list(rrulestr(normalise_until(rrule), dtstart=anchor))
     rule_bound = (
-        _epoch(instances[-1] + (dtend - dtstart)) if instances else _epoch(dtstart)
+        instant_epoch(instances[-1] + (dtend - dtstart))
+        if instances
+        else instant_epoch(dtstart)
     )
     duration = int((dtend - dtstart).total_seconds())
     if rdate_bound is not None:
@@ -180,8 +188,27 @@ def _recurrence_end_epoch(rrule, dtstart, dtend, all_day, tzid, rdates=()):
     return rule_bound
 
 
-def _epoch(value):
+def instant_epoch(value):
+    """Return the UTC-second epoch for a ``date`` or tz-aware ``datetime``.
+
+    The one epoch convention shared by the importer, the window resolver, and
+    every app composing them: a ``date`` maps to its UTC-midnight epoch; a
+    ``datetime`` must be tz-aware. Recurrence suppression, EXDATE/RDATE
+    matching, hide annotations, and query bounds all compare these values, so
+    a second implementation is a correctness hazard, not a style choice.
+
+    Args:
+        value: A ``datetime.date`` or tz-aware ``datetime.datetime``.
+
+    Returns:
+        Integer UTC-second epoch.
+
+    Raises:
+        ValueError: ``value`` is a naive ``datetime`` (no silent localisation).
+    """
     if isinstance(value, _dt.datetime):
+        if value.tzinfo is None:
+            raise ValueError(f"naive datetime not supported: {value!r}")
         return int(value.timestamp())
     midnight = _dt.datetime(value.year, value.month, value.day, tzinfo=_dt.timezone.utc)
     return int(midnight.timestamp())
@@ -202,7 +229,7 @@ def _point(prop, uid):
         tzid = str(value.tzinfo)
     return (
         value,
-        _epoch(value),
+        instant_epoch(value),
         isinstance(value, _dt.date) and not isinstance(value, _dt.datetime),
         tzid,
     )
@@ -263,7 +290,7 @@ def vevent_to_card(vevent, source):
         dtend, dtend_epoch, _, _ = _point(vevent["DTEND"], uid)
     elif all_day:
         dtend = dtstart + _dt.timedelta(days=1)
-        dtend_epoch = _epoch(dtend)
+        dtend_epoch = instant_epoch(dtend)
     else:
         dtend, dtend_epoch = dtstart, dtstart_epoch
 
@@ -277,7 +304,7 @@ def vevent_to_card(vevent, source):
         "source": source,
         "uid": uid,
         "recurrence_id": recurrence_id,
-        "recurrence_id_epoch": _epoch(recurrence_id)
+        "recurrence_id_epoch": instant_epoch(recurrence_id)
         if recurrence_id is not None
         else None,
         "dtstart": dtstart,
@@ -286,7 +313,7 @@ def vevent_to_card(vevent, source):
         "dtend_epoch": dtend_epoch,
         "all_day": all_day,
         "tzid": tzid,
-        "status": status,
+        "event_status": status,
         "transp": str(vevent["TRANSP"]) if vevent.get("TRANSP") else None,
         "sequence": int(vevent["SEQUENCE"])
         if vevent.get("SEQUENCE") is not None
@@ -379,6 +406,55 @@ def description_of(body):
     if not sep:
         raise ValueError("card body lacks a fenced VEVENT")
     return prefix[:-2] if prefix.endswith("\n\n") else prefix
+
+
+def fenced_vevent_text(body):
+    """Return the raw text inside the card body's fenced VEVENT block.
+
+    The single authority for reading the fence — one regex, one failure mode —
+    shared by `fenced_vevent` and readers that need the fence lines verbatim
+    (recurrence lines must not be re-serialised).
+
+    Raises:
+        ValueError: The body has no fenced VEVENT (crash-on-drift).
+    """
+    fence = re.search(r"```ics\n(.*?)\n```", body, re.DOTALL)
+    if fence is None:
+        raise ValueError("card body lacks a fenced VEVENT")
+    return fence.group(1)
+
+
+def fenced_vevent(body):
+    """Parse the card body's fenced VEVENT back into an ``icalendar.Event``.
+
+    Raises:
+        ValueError: The body has no fenced VEVENT (crash-on-drift).
+    """
+    return icalendar.Event.from_ical(fenced_vevent_text(body))
+
+
+def apply_render(card, rendered):
+    """Apply a fresh render onto an existing card, preserving non-owned YAML.
+
+    THE strip discipline, in one place: every key in `EVENT_KEYS` is replaced
+    by the render's output (keys the source dropped disappear), every other
+    key — GTD fields, ``dispatched``, hide annotations — survives verbatim.
+    ``tags`` are untouched (deck-owned after creation). The caller commits via
+    ``editor.update(card, summary=rendered.summary)``.
+
+    Args:
+        card: The existing ``mddb.Card`` (from ``editor.read``).
+        rendered: The `RenderedCard` to apply.
+
+    Returns:
+        The same card, mutated in place.
+    """
+    kept = {k: v for k, v in card.yaml.items() if k not in EVENT_KEYS}
+    kept["title"] = rendered.title
+    kept.update(rendered.yaml)
+    card.yaml = kept
+    card.body = rendered.body
+    return card
 
 
 _MEETING_PROVIDERS = (
@@ -631,10 +707,14 @@ def _unchanged(card, existing):
 def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=()):
     """Idempotently import an `.ics` calendar into the mddb deck at `deck`.
 
-    Opens (or initialises) the deck, renders one card per VEVENT, and within a
-    per-year `db.editor` block creates new cards, updates changed ones, and skips
-    unchanged ones — keyed on ``source + uid + recurrence_id``. A year with no
-    creates/updates opens no editor block, so a clean re-import produces no commit.
+    Opens (or initialises) the deck, renders one card per VEVENT, and applies
+    every create, update, and prune in ONE `db.editor` block pinned to the
+    deck HEAD captured at the initial read — keyed on ``source + uid +
+    recurrence_id``. The explicit base makes a concurrent commit (a timer
+    sync's pull, another writer) between the read and the commit a loud
+    ``mddb.ConflictError`` rather than a write planned against a stale view.
+    An import with nothing to change opens no editor block, so a clean
+    re-import produces no commit.
 
     Tags are deck-owned after creation: a new card's tags are seeded once
     (feed ``CATEGORIES`` first, then ``tags`` values not already present) and
@@ -666,6 +746,7 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=(
     if prune and (uid is not None or limit is not None):
         raise ValueError("prune requires a full feed; cannot combine with uid/limit")
     db = _open_or_init(deck)
+    base = db.head()
     existing = _existing_map(db, source)
     by_year = collections.defaultdict(list)
     for vevent in _vevents(ics_path, uid, limit):
@@ -673,54 +754,30 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=(
         by_year[card.yaml["dtstart"].year].append(card)
 
     counts = {"created": 0, "updated": 0, "skipped": 0, "pruned": 0}
+    actions = []
+    per_year = {}
     for year in sorted(by_year):
-        actions = []
-        year_skipped = 0
+        created = updated = skipped = 0
         for card in by_year[year]:
             cid = existing.get(
                 (card.yaml["uid"], _ident(card.yaml.get("recurrence_id")))
             )
             if cid is None:
                 actions.append((card, None))
+                created += 1
                 continue
             existing_card = db.read(cid)
             if _guarded(card, existing_card) or _unchanged(card, existing_card):
-                year_skipped += 1
+                skipped += 1
             else:
                 actions.append((card, cid))
-        counts["skipped"] += year_skipped
-        if not actions:
-            continue
-        year_created = year_updated = 0
-        with db.editor(rationale=f"import {source} {year}") as editor:
-            for card, cid in actions:
-                if cid is None:
-                    seeded = _seeded_tags(card.tags, tags)
-                    editor.create(
-                        title=card.title,
-                        summary=card.summary,
-                        tags=seeded or None,
-                        body=card.body,
-                        relpath=card.relpath,
-                        yaml=card.yaml,
-                    )
-                    year_created += 1
-                else:
-                    existing_card = editor.read(cid)
-                    kept = {
-                        k: v
-                        for k, v in existing_card.yaml.items()
-                        if k not in EVENT_KEYS
-                    }
-                    kept["title"] = card.title
-                    kept.update(card.yaml)
-                    existing_card.yaml = kept
-                    existing_card.body = card.body
-                    editor.update(existing_card, summary=card.summary)
-                    year_updated += 1
-        counts["created"] += year_created
-        counts["updated"] += year_updated
-        print(f"  {year}: +{year_created} ~{year_updated} ={year_skipped}")
+                updated += 1
+        per_year[year] = (created, updated, skipped)
+        counts["created"] += created
+        counts["updated"] += updated
+        counts["skipped"] += skipped
+
+    stale = []
     if prune:
         feed_idents = {
             (card.yaml["uid"], _ident(card.yaml.get("recurrence_id")))
@@ -737,11 +794,32 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=(
                 and now - dispatched < GRACE
             )
         ]
-        if stale:
-            with db.editor(rationale=f"prune {source}: {len(stale)} removed") as editor:
-                for cid in stale:
-                    editor.delete(cid)
         counts["pruned"] = len(stale)
+
+    if actions or stale:
+        rationale = (
+            f"import {source}: +{counts['created']} ~{counts['updated']}"
+            f" -{counts['pruned']}"
+        )
+        with db.editor(rationale=rationale, base=base) as editor:
+            for card, cid in actions:
+                if cid is None:
+                    seeded = _seeded_tags(card.tags, tags)
+                    editor.create(
+                        title=card.title,
+                        summary=card.summary,
+                        tags=seeded or None,
+                        body=card.body,
+                        relpath=card.relpath,
+                        yaml=card.yaml,
+                    )
+                else:
+                    existing_card = apply_render(editor.read(cid), card)
+                    editor.update(existing_card, summary=card.summary)
+            for cid in stale:
+                editor.delete(cid)
+    for year, (created, updated, skipped) in per_year.items():
+        print(f"  {year}: +{created} ~{updated} ={skipped}")
     return counts
 
 
