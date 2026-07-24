@@ -142,6 +142,10 @@ def occurrence_json(occurrence, synced=()):
         "meeting_links": yaml.get("meeting_links") or [],
         "attachments": yaml.get("attachments") or [],
         "gcal_link": yaml.get("gcal_link"),
+        "invitation_status": yaml.get("invitation_status"),
+        "invitation_handle": yaml.get("invitation_handle"),
+        "invitation_proposal_sha": yaml.get("invitation_proposal_sha"),
+        "invitation_proposals": yaml.get("invitation_proposals") or [],
     }
 
 
