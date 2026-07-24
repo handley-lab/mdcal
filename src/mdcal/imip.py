@@ -16,10 +16,14 @@ event locally via :func:`mdcal.ics.vevent_to_card`.
 """
 
 import argparse
+import copy
 import datetime as _dt
+import hashlib
 import sys
 from dataclasses import dataclass
+from email.headerregistry import Address
 from email.message import EmailMessage
+from zoneinfo import ZoneInfo
 
 import icalendar
 
@@ -31,6 +35,101 @@ _PRODID = "-//handley-lab//mdcal//EN"
 def _addr(value):
     """The bare email of an ``ORGANIZER``/``ATTENDEE`` value (drops ``mailto:``)."""
     return str(value).split(":", 1)[-1] if value is not None else None
+
+
+def _mailboxes(attendees):
+    """Validate and de-duplicate explicit attendee addresses in input order."""
+    result = []
+    seen = set()
+    for attendee in attendees:
+        try:
+            address = Address(addr_spec=attendee).addr_spec
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"invalid attendee address: {attendee!r}") from error
+        key = address.casefold()
+        if key in seen:
+            raise ValueError(f"duplicate attendee address: {attendee}")
+        seen.add(key)
+        result.append(address)
+    if not result:
+        raise ValueError("at least one attendee is required")
+    return result
+
+
+def _add_timezones(calendar, event):
+    tzids = {
+        str(value.params["TZID"])
+        for _, value in event.property_items()
+        if getattr(value, "params", {}).get("TZID")
+    }
+    for tzid in sorted(tzids):
+        calendar.add_component(icalendar.Timezone.from_tzinfo(ZoneInfo(tzid), tzid))
+
+
+def _outbound(vevent, organiser, attendees, method):
+    recipients = _mailboxes(attendees)
+    try:
+        sender = Address(addr_spec=organiser).addr_spec
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"invalid organiser address: {organiser!r}") from error
+
+    event = copy.deepcopy(vevent)
+    event["ORGANIZER"] = icalendar.vCalAddress(f"mailto:{sender}")
+    while "ATTENDEE" in event:
+        del event["ATTENDEE"]
+    for recipient in recipients:
+        attendee = icalendar.vCalAddress(f"mailto:{recipient}")
+        attendee.params["PARTSTAT"] = "NEEDS-ACTION"
+        attendee.params["RSVP"] = "TRUE"
+        event.add("attendee", attendee, encode=False)
+
+    calendar = icalendar.Calendar()
+    calendar.add("prodid", _PRODID)
+    calendar.add("version", "2.0")
+    calendar.add("method", method)
+    _add_timezones(calendar, event)
+    calendar.add_component(event)
+    payload = calendar.to_ical()
+
+    summary = str(event.get("SUMMARY", ""))
+    operation = (
+        "Cancelled"
+        if method == "CANCEL"
+        else "Updated"
+        if int(event.get("SEQUENCE", 0))
+        else "Invitation"
+    )
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = ", ".join(recipients)
+    message["Subject"] = f"{operation}: {summary}"
+    message.set_content(f"{operation}: {summary}")
+    message.add_alternative(
+        payload.decode(),
+        subtype="calendar",
+        params={"method": method, "charset": "UTF-8"},
+    )
+    return message, payload
+
+
+def build_request(vevent, organiser, attendees):
+    """Build one REQUEST email and calendar payload for explicit attendees."""
+    return _outbound(vevent, organiser, attendees, "REQUEST")
+
+
+def build_update(vevent, organiser, attendees):
+    """Build a REQUEST update after incrementing the event sequence."""
+    event = copy.deepcopy(vevent)
+    event["SEQUENCE"] = int(event.get("SEQUENCE", 0)) + 1
+    return _outbound(event, organiser, attendees, "REQUEST")
+
+
+def build_cancel(vevent, organiser, attendees):
+    """Build one CANCEL email and calendar payload for explicit attendees."""
+    event = copy.deepcopy(vevent)
+    event["SEQUENCE"] = int(event.get("SEQUENCE", 0)) + 1
+    event["STATUS"] = "CANCELLED"
+    return _outbound(event, organiser, attendees, "CANCEL")
 
 
 @dataclass
@@ -58,6 +157,30 @@ class Invite:
     dtend: object
     location: str
     vevent: icalendar.Event
+
+
+@dataclass(frozen=True)
+class InvitationIntent:
+    """Stable identity for reconciling an exact iCalendar proposal."""
+
+    key: str
+    method: str
+    uid: str
+    sequence: int
+    digest: str
+
+
+def invitation_intent(payload):
+    """Describe an exact calendar payload without mutating a deck."""
+    calendar = icalendar.Calendar.from_ical(payload)
+    method = str(calendar["METHOD"])
+    (event,) = calendar.walk("VEVENT")
+    uid = str(event["UID"])
+    sequence = int(event.get("SEQUENCE", 0))
+    digest = hashlib.sha256(payload).hexdigest()
+    return InvitationIntent(
+        f"{uid}:{sequence}:{method}:{digest}", method, uid, sequence, digest
+    )
 
 
 def _request_master(ics_text):
@@ -109,7 +232,7 @@ def parse_request(ics_text):
     )
 
 
-def build_reply(ics_text, attendee, response, cn=None):
+def build_reply(ics_text, attendee, response, cn=None, dtstamp=None):
     """Serialise the ``METHOD:REPLY`` for a responder's decision on a REQUEST.
 
     The reply echoes the REQUEST's UID, SEQUENCE, ORGANIZER, DTSTART and SUMMARY,
@@ -121,6 +244,8 @@ def build_reply(ics_text, attendee, response, cn=None):
         attendee: The responder's email (the reply's From/ATTENDEE).
         response: One of ``accept`` / ``decline`` / ``tentative``.
         cn: Optional display name for the responder's ATTENDEE line.
+        dtstamp: Timestamp for deterministic proposal construction; current UTC
+            time when omitted.
 
     Returns:
         The REPLY `.ics` text.
@@ -143,8 +268,10 @@ def build_reply(ics_text, attendee, response, cn=None):
     event = icalendar.Event()
     event.add("uid", req["UID"])
     event.add("sequence", int(req.get("SEQUENCE", 0)))
-    event.add("dtstamp", _dt.datetime.now(_dt.timezone.utc))
+    event.add("dtstamp", dtstamp or _dt.datetime.now(_dt.timezone.utc))
     event.add("dtstart", req["DTSTART"].dt)
+    if "RECURRENCE-ID" in req:
+        event["RECURRENCE-ID"] = req["RECURRENCE-ID"]
     if "SUMMARY" in req:
         event.add("summary", req["SUMMARY"])
     event["ORGANIZER"] = req["ORGANIZER"]
@@ -155,11 +282,12 @@ def build_reply(ics_text, attendee, response, cn=None):
         who.params["CN"] = cn
     event.add("attendee", who, encode=False)
 
+    _add_timezones(reply, event)
     reply.add_component(event)
     return reply.to_ical().decode()
 
 
-def build_reply_email(ics_text, attendee, response, cn=None):
+def build_reply_email(ics_text, attendee, response, cn=None, dtstamp=None):
     """Build the iMIP REPLY *email* the responder sends to the organiser.
 
     Wraps :func:`build_reply` as a ``text/calendar; method=REPLY`` message
@@ -171,12 +299,14 @@ def build_reply_email(ics_text, attendee, response, cn=None):
         attendee: The responder's email (``From``).
         response: One of ``accept`` / ``decline`` / ``tentative``.
         cn: Optional display name for the responder.
+        dtstamp: Timestamp for deterministic proposal construction; current UTC
+            time when omitted.
 
     Returns:
         An :class:`email.message.EmailMessage` ready to submit.
     """
     invite = parse_request(ics_text)
-    reply_ics = build_reply(ics_text, attendee, response, cn=cn)
+    reply_ics = build_reply(ics_text, attendee, response, cn=cn, dtstamp=dtstamp)
 
     verb = {"accept": "Accepted", "decline": "Declined", "tentative": "Tentative"}[
         response

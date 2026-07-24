@@ -5,8 +5,12 @@ import pytest
 
 from mdcal.imip import (
     Invite,
+    build_cancel,
     build_reply,
     build_reply_email,
+    build_request,
+    build_update,
+    invitation_intent,
     parse_request,
 )
 
@@ -89,3 +93,152 @@ def test_build_reply_email_addresses_organiser():
     cal_part = next(p for p in msg.walk() if p.get_content_type() == "text/calendar")
     assert cal_part.get_param("method") == "REPLY"
     assert "METHOD:REPLY" in cal_part.get_content()
+
+
+def _outbound_event(sequence=0):
+    event = icalendar.Event()
+    event.add("uid", "outbound-1@mdcal")
+    event.add("sequence", sequence)
+    event.add("dtstamp", dt.datetime(2026, 7, 24, 12, tzinfo=dt.timezone.utc))
+    event.add("dtstart", dt.datetime(2026, 7, 24, 20, tzinfo=dt.timezone.utc))
+    event.add("dtend", dt.datetime(2026, 7, 24, 21, tzinfo=dt.timezone.utc))
+    event.add("summary", "Dinner")
+    event.add("location", "Cambridge")
+    return event
+
+
+def test_build_request_is_one_stably_ordered_multi_attendee_message():
+    msg, payload = build_request(
+        _outbound_event(),
+        "wh260@cam.ac.uk",
+        ["second@example.org", "first@example.org"],
+    )
+    assert msg["From"] == "wh260@cam.ac.uk"
+    assert msg["To"] == "second@example.org, first@example.org"
+    assert msg["Subject"] == "Invitation: Dinner"
+    calendar = icalendar.Calendar.from_ical(payload)
+    assert str(calendar["METHOD"]) == "REQUEST"
+    (event,) = calendar.walk("VEVENT")
+    assert str(event["UID"]) == "outbound-1@mdcal"
+    assert int(event["SEQUENCE"]) == 0
+    assert [str(value) for value in event["ATTENDEE"]] == [
+        "mailto:second@example.org",
+        "mailto:first@example.org",
+    ]
+    assert all(
+        value.params["PARTSTAT"] == "NEEDS-ACTION" for value in event["ATTENDEE"]
+    )
+    part = next(p for p in msg.walk() if p.get_content_type() == "text/calendar")
+    assert part.get_param("method") == "REQUEST"
+    assert icalendar.Calendar.from_ical(part.get_content()).to_ical() == payload
+
+
+def test_build_update_is_retry_stable_without_mutating_caller_sequence():
+    source = _outbound_event(sequence=3)
+    msg, payload = build_update(source, "wh260@cam.ac.uk", ["person@example.org"])
+    _, retried = build_update(source, "wh260@cam.ac.uk", ["person@example.org"])
+    assert msg["Subject"] == "Updated: Dinner"
+    (event,) = icalendar.Calendar.from_ical(payload).walk("VEVENT")
+    assert int(event["SEQUENCE"]) == 4
+    assert int(source["SEQUENCE"]) == 3
+    assert retried == payload
+    assert invitation_intent(retried) == invitation_intent(payload)
+
+
+def test_build_request_preserves_timezone_and_recurrence():
+    event = _outbound_event()
+    event["DTSTART"] = icalendar.vDatetime(
+        dt.datetime(2026, 7, 24, 20, tzinfo=dt.timezone(dt.timedelta(hours=1)))
+    )
+    event["DTSTART"].params["TZID"] = "Europe/London"
+    event.add("rrule", {"freq": "weekly", "count": 3})
+    _, payload = build_request(event, "wh260@cam.ac.uk", ["person@example.org"])
+    calendar = icalendar.Calendar.from_ical(payload)
+    (outbound,) = calendar.walk("VEVENT")
+    assert outbound["DTSTART"].params["TZID"] == "Europe/London"
+    assert outbound["RRULE"]["FREQ"] == ["WEEKLY"]
+    assert outbound["RRULE"]["COUNT"] == [3]
+    (timezone,) = calendar.walk("VTIMEZONE")
+    assert str(timezone["TZID"]) == "Europe/London"
+
+
+def test_build_cancel_is_retry_stable_without_mutating_caller():
+    source = _outbound_event(sequence=4)
+    msg, payload = build_cancel(source, "wh260@cam.ac.uk", ["person@example.org"])
+    _, retried = build_cancel(source, "wh260@cam.ac.uk", ["person@example.org"])
+    assert msg["Subject"] == "Cancelled: Dinner"
+    calendar = icalendar.Calendar.from_ical(payload)
+    assert str(calendar["METHOD"]) == "CANCEL"
+    (event,) = calendar.walk("VEVENT")
+    assert str(event["UID"]) == "outbound-1@mdcal"
+    assert int(event["SEQUENCE"]) == 5
+    assert str(event["STATUS"]) == "CANCELLED"
+    assert int(source["SEQUENCE"]) == 4
+    assert source.get("STATUS") is None
+    assert retried == payload
+    assert invitation_intent(retried) == invitation_intent(payload)
+
+
+def test_build_reply_preserves_recurring_instance_identity():
+    instance = REQUEST.replace(
+        "DTSTART:20260710T140000Z\r\n",
+        "DTSTART:20260710T140000Z\r\nRECURRENCE-ID:20260710T140000Z\r\n",
+    )
+    reply = build_reply(
+        instance,
+        "wh260@cam.ac.uk",
+        "accept",
+        dtstamp=dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc),
+    )
+    (event,) = icalendar.Calendar.from_ical(reply).walk("VEVENT")
+    assert event["RECURRENCE-ID"].dt == dt.datetime(
+        2026, 7, 10, 14, tzinfo=dt.timezone.utc
+    )
+
+
+def test_build_reply_includes_timezone_for_recurring_instance():
+    instance = REQUEST.replace(
+        "DTSTART:20260710T140000Z\r\n",
+        "DTSTART;TZID=Europe/London:20260710T140000\r\n"
+        "RECURRENCE-ID;TZID=Europe/London:20260710T140000\r\n",
+    )
+    reply = build_reply(
+        instance,
+        "wh260@cam.ac.uk",
+        "accept",
+        dtstamp=dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc),
+    )
+    calendar = icalendar.Calendar.from_ical(reply)
+    (event,) = calendar.walk("VEVENT")
+    assert event["DTSTART"].params["TZID"] == "Europe/London"
+    assert event["RECURRENCE-ID"].params["TZID"] == "Europe/London"
+    (timezone,) = calendar.walk("VTIMEZONE")
+    assert str(timezone["TZID"]) == "Europe/London"
+
+
+def test_invitation_intent_binds_uid_sequence_method_and_exact_payload():
+    _, payload = build_request(
+        _outbound_event(sequence=3), "wh260@cam.ac.uk", ["person@example.org"]
+    )
+    intent = invitation_intent(payload)
+    assert intent.uid == "outbound-1@mdcal"
+    assert intent.sequence == 3
+    assert intent.method == "REQUEST"
+    assert intent.key == f"outbound-1@mdcal:3:REQUEST:{intent.digest}"
+    _, changed = build_request(
+        _outbound_event(sequence=3), "wh260@cam.ac.uk", ["other@example.org"]
+    )
+    assert invitation_intent(changed).key != intent.key
+
+
+@pytest.mark.parametrize(
+    "attendees,match",
+    [
+        ([], "at least one attendee"),
+        (["not-an-address"], "invalid attendee"),
+        (["A@example.org", "a@example.org"], "duplicate attendee"),
+    ],
+)
+def test_build_request_rejects_invalid_recipient_sets(attendees, match):
+    with pytest.raises(ValueError, match=match):
+        build_request(_outbound_event(), "wh260@cam.ac.uk", attendees)
