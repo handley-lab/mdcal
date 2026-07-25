@@ -27,9 +27,16 @@ from zoneinfo import ZoneInfo
 
 import icalendar
 
+from mdcal.events import card_event_json
+from mdcal.ics import vevent_to_card
+
 PARTSTATS = {"accept": "ACCEPTED", "decline": "DECLINED", "tentative": "TENTATIVE"}
 
 _PRODID = "-//handley-lab//mdcal//EN"
+
+
+class InvalidInvitation(ValueError):
+    """The pinned iMIP payload cannot be rendered as one calendar event."""
 
 
 def _addr(value):
@@ -181,6 +188,32 @@ def invitation_intent(payload):
     return InvitationIntent(
         f"{uid}:{sequence}:{method}:{digest}", method, uid, sequence, digest
     )
+
+
+def invitation_preview(payload):
+    """Project one exact iMIP payload into the shared event vocabulary."""
+    try:
+        text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+        calendar = icalendar.Calendar.from_ical(text)
+        method = str(calendar.get("METHOD") or "")
+        if method not in {"REQUEST", "REPLY", "CANCEL"}:
+            raise InvalidInvitation(
+                f"unsupported iMIP METHOD: {method or 'absent'}"
+            )
+        events = calendar.walk("VEVENT")
+        if len(events) != 1:
+            raise InvalidInvitation(
+                f"iMIP payload must contain exactly one VEVENT, got {len(events)}"
+            )
+        card = vevent_to_card(events[0], "imip")
+    except InvalidInvitation:
+        raise
+    except (KeyError, UnicodeError, ValueError) as error:
+        raise InvalidInvitation(f"invalid iMIP payload: {error}") from error
+    return {
+        "operation": method,
+        "event": card_event_json(card, card.yaml["dtstart"], card.yaml["dtend"]),
+    }
 
 
 def _request_master(ics_text):

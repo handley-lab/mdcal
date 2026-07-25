@@ -4,6 +4,7 @@ import icalendar
 import pytest
 
 from mdcal.imip import (
+    InvalidInvitation,
     Invite,
     build_cancel,
     build_reply,
@@ -11,6 +12,7 @@ from mdcal.imip import (
     build_request,
     build_update,
     invitation_intent,
+    invitation_preview,
     parse_request,
 )
 
@@ -229,6 +231,96 @@ def test_invitation_intent_binds_uid_sequence_method_and_exact_payload():
         _outbound_event(sequence=3), "wh260@cam.ac.uk", ["other@example.org"]
     )
     assert invitation_intent(changed).key != intent.key
+
+
+def test_invitation_preview_uses_shared_event_vocabulary():
+    preview = invitation_preview(
+        REQUEST.replace(
+            "LOCATION:MR13, Pavilion B\r\n",
+            "LOCATION:MR13, Pavilion B\r\nDESCRIPTION:Bring notes\r\n",
+        ).encode()
+    )
+    assert preview == {
+        "operation": "REQUEST",
+        "event": {
+            "uid": "abc123@google.com",
+            "title": "Project sync",
+            "start": "2026-07-10T14:00:00+00:00",
+            "end": "2026-07-10T15:00:00+00:00",
+            "dtstart": "2026-07-10T14:00:00+00:00",
+            "dtend": "2026-07-10T15:00:00+00:00",
+            "all_day": False,
+            "location": "MR13, Pavilion B",
+            "tzid": "UTC",
+            "status": "CONFIRMED",
+            "rrule": None,
+            "description": "Bring notes",
+            "organizer": "jane@example.org",
+            "attendees": [
+                {
+                    "email": "wh260@cam.ac.uk",
+                    "name": "Will Handley",
+                    "status": "NEEDS-ACTION",
+                }
+            ],
+            "attendees_omitted": False,
+            "my_status": None,
+            "conference": [],
+            "conference_url": None,
+            "meeting_links": [],
+            "attachments": [],
+            "gcal_link": None,
+        },
+    }
+
+
+@pytest.mark.parametrize("method", ["REQUEST", "REPLY", "CANCEL"])
+def test_invitation_preview_accepts_each_invitation_method(method):
+    preview = invitation_preview(REQUEST.replace("METHOD:REQUEST", f"METHOD:{method}"))
+    assert preview["operation"] == method
+
+
+@pytest.mark.parametrize(
+    "payload,match",
+    [
+        (b"\xff", "invalid iMIP payload"),
+        (b"not a calendar", "invalid iMIP payload"),
+        (b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n", "METHOD"),
+        (
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\n"
+            b"END:VCALENDAR\r\n",
+            "METHOD",
+        ),
+        (
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\n"
+            b"END:VCALENDAR\r\n",
+            "exactly one VEVENT",
+        ),
+        (
+            REQUEST.replace(
+                "END:VEVENT\r\nEND:VCALENDAR",
+                "END:VEVENT\r\nBEGIN:VEVENT\r\nUID:second\r\n"
+                "DTSTART:20260710T160000Z\r\nEND:VEVENT\r\nEND:VCALENDAR",
+            ).encode(),
+            "exactly one VEVENT",
+        ),
+        (
+            REQUEST.replace("DTSTART:20260710T140000Z", "DTSTART:20260710T140000").encode(),
+            "invalid iMIP payload",
+        ),
+        (
+            REQUEST.replace("UID:abc123@google.com\r\n", "").encode(),
+            "invalid iMIP payload",
+        ),
+        (
+            REQUEST.replace("DTSTART:20260710T140000Z\r\n", "").encode(),
+            "invalid iMIP payload",
+        ),
+    ],
+)
+def test_invitation_preview_rejects_unrenderable_payloads(payload, match):
+    with pytest.raises(InvalidInvitation, match=match):
+        invitation_preview(payload)
 
 
 @pytest.mark.parametrize(

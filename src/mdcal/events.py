@@ -76,6 +76,34 @@ def window_bound(value):
     return bound
 
 
+def card_event_json(card, start, end):
+    """Serialise one rendered card into the shared read-only event vocabulary."""
+    yaml = card.yaml
+    return {
+        "uid": yaml["uid"],
+        "title": card.title,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "dtstart": yaml["dtstart"].isoformat(),
+        "dtend": yaml["dtend"].isoformat(),
+        "all_day": yaml["all_day"],
+        "location": yaml.get("location"),
+        "tzid": yaml.get("tzid"),
+        "status": yaml["event_status"],
+        "rrule": yaml.get("rrule"),
+        "description": description_of(card.body),
+        "organizer": yaml.get("organizer"),
+        "attendees": yaml.get("attendees") or [],
+        "attendees_omitted": bool(yaml.get("attendees_omitted")),
+        "my_status": yaml.get("my_status"),
+        "conference": yaml.get("conference") or [],
+        "conference_url": yaml.get("conference_url"),
+        "meeting_links": yaml.get("meeting_links") or [],
+        "attachments": yaml.get("attachments") or [],
+        "gcal_link": yaml.get("gcal_link"),
+    }
+
+
 def occurrence_json(occurrence, synced=()):
     """Serialise one resolver occurrence for the grid.
 
@@ -115,33 +143,13 @@ def occurrence_json(occurrence, synced=()):
     """
     yaml = occurrence.card.yaml
     return {
+        **card_event_json(occurrence.card, occurrence.start, occurrence.end),
         "id": yaml["id"],
-        "uid": yaml["uid"],
-        "title": occurrence.card.title,
-        "start": occurrence.start.isoformat(),
-        "end": occurrence.end.isoformat(),
-        "dtstart": yaml["dtstart"].isoformat(),
-        "dtend": yaml["dtend"].isoformat(),
-        "all_day": yaml["all_day"],
         "recurring": occurrence.recurring,
-        "location": yaml.get("location"),
-        "tzid": yaml.get("tzid"),
-        "status": yaml["event_status"],
-        "rrule": yaml.get("rrule"),
-        "description": description_of(occurrence.card.body),
         "editable": _writable(yaml, synced),
         "tags": yaml.get("tags") or [],
         "hidden": occurrence.hidden,
         "series_member": occurrence.recurring or "recurrence_id" in yaml,
-        "organizer": yaml.get("organizer"),
-        "attendees": yaml.get("attendees") or [],
-        "attendees_omitted": bool(yaml.get("attendees_omitted")),
-        "my_status": yaml.get("my_status"),
-        "conference": yaml.get("conference") or [],
-        "conference_url": yaml.get("conference_url"),
-        "meeting_links": yaml.get("meeting_links") or [],
-        "attachments": yaml.get("attachments") or [],
-        "gcal_link": yaml.get("gcal_link"),
         "invitation_status": yaml.get("invitation_status"),
         "invitation_handle": yaml.get("invitation_handle"),
         "invitation_proposal_sha": yaml.get("invitation_proposal_sha"),
