@@ -109,8 +109,9 @@ def occurrence_json(occurrence, synced=()):
         modal renders: ``organizer``, ``attendees`` (with
         ``attendees_omitted`` marking a Google-capped list), ``my_status``
         (the user's own PARTSTAT — declined events render struck through),
-        ``conference`` entry points with ``conference_url`` as the
-        pre-enrichment fallback link, ``attachments``, and ``gcal_link``.
+        card-level ``meeting_links``, ``conference`` entry points with
+        ``conference_url`` as the pre-enrichment fallback link,
+        ``attachments``, and ``gcal_link``.
     """
     yaml = occurrence.card.yaml
     return {
@@ -127,7 +128,7 @@ def occurrence_json(occurrence, synced=()):
         "tzid": yaml.get("tzid"),
         "status": yaml["event_status"],
         "rrule": yaml.get("rrule"),
-        "description": description_of(occurrence.card.body).strip(),
+        "description": description_of(occurrence.card.body),
         "editable": _writable(yaml, synced),
         "tags": yaml.get("tags") or [],
         "hidden": occurrence.hidden,
@@ -138,6 +139,7 @@ def occurrence_json(occurrence, synced=()):
         "my_status": yaml.get("my_status"),
         "conference": yaml.get("conference") or [],
         "conference_url": yaml.get("conference_url"),
+        "meeting_links": yaml.get("meeting_links") or [],
         "attachments": yaml.get("attachments") or [],
         "gcal_link": yaml.get("gcal_link"),
     }
@@ -1650,7 +1652,7 @@ def _reset_instance(deck, override, synced, gapi):
     vevent.add("DTEND", slot + duration)
     if master.yaml.get("location"):
         vevent.add("LOCATION", master.yaml["location"])
-    description = description_of(master.body).strip()
+    description = description_of(master.body)
     if description:
         vevent.add("DESCRIPTION", description)
     vevent.add("RECURRENCE-ID", slot)

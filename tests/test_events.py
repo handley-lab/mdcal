@@ -1041,7 +1041,8 @@ def test_undo_synced_delete_restores_confirmed(deck, synced):
 
 
 def test_undo_synced_override_create_resets_instance(deck, synced):
-    card_id = _screate(deck, RECUR, synced)
+    description = "  <b>series description</b>  "
+    card_id = _screate(deck, {**RECUR, "description": description}, synced)
     update_event(
         deck,
         card_id,
@@ -1062,6 +1063,7 @@ def test_undo_synced_override_create_resets_instance(deck, synced):
     reset = synced.patches[-1][3]
     assert str(reset.yaml["dtstart"]).startswith("2024-06-10 09:00")
     assert reset.yaml["event_status"] == "CONFIRMED"
+    assert mdcal.events.description_of(reset.body) == description
     starts = [
         o["start"] for o in _window(deck, 2024, 6, 10, 2024, 6, 11, synced=synced.map)
     ]
@@ -2063,11 +2065,29 @@ def test_occurrence_json_exposes_details(deck):
         {"uri": "https://meet.google.com/abc", "type": "video"}
     ]
     assert occ["conference_url"] == "https://meet.google.com/abc"
+    assert occ["meeting_links"] == [
+        {"url": "https://meet.google.com/abc", "provider": "Google Meet"}
+    ]
     assert occ["attachments"] == [
         {"url": "https://drive.google.com/a", "title": "Agenda.pdf"}
     ]
     assert occ["gcal_link"] == "https://calendar.google.com/event?eid=abc"
     assert occ["attendees_omitted"] is False
+
+
+def test_occurrence_json_preserves_exact_description(deck):
+    event = (
+        "UID:description@x\nSUMMARY:Description\n"
+        "DTSTART;TZID=Europe/London:20240603T100000\n"
+        "DTEND;TZID=Europe/London:20240603T103000\n"
+        'STATUS:CONFIRMED\nDESCRIPTION:  <a href="https://zoom.us/j/1">Join</a>  '
+    )
+    _card_with(deck, event)
+    (occ,) = [
+        o for o in _window(deck, 2024, 6, 3, 2024, 6, 4) if o["title"] == "Description"
+    ]
+    assert occ["description"] == '  <a href="https://zoom.us/j/1">Join</a>  '
+    assert occ["meeting_links"] == [{"url": "https://zoom.us/j/1", "provider": "Zoom"}]
 
 
 def test_update_from_carries_enrichment(deck):
