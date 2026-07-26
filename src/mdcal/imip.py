@@ -197,9 +197,7 @@ def invitation_preview(payload):
         calendar = icalendar.Calendar.from_ical(text)
         method = str(calendar.get("METHOD") or "")
         if method not in {"REQUEST", "REPLY", "CANCEL"}:
-            raise InvalidInvitation(
-                f"unsupported iMIP METHOD: {method or 'absent'}"
-            )
+            raise InvalidInvitation(f"unsupported iMIP METHOD: {method or 'absent'}")
         events = calendar.walk("VEVENT")
         if len(events) != 1:
             raise InvalidInvitation(

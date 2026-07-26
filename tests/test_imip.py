@@ -287,13 +287,11 @@ def test_invitation_preview_accepts_each_invitation_method(method):
         (b"not a calendar", "invalid iMIP payload"),
         (b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n", "METHOD"),
         (
-            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\n"
-            b"END:VCALENDAR\r\n",
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\nEND:VCALENDAR\r\n",
             "METHOD",
         ),
         (
-            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\n"
-            b"END:VCALENDAR\r\n",
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n",
             "exactly one VEVENT",
         ),
         (
@@ -305,7 +303,9 @@ def test_invitation_preview_accepts_each_invitation_method(method):
             "exactly one VEVENT",
         ),
         (
-            REQUEST.replace("DTSTART:20260710T140000Z", "DTSTART:20260710T140000").encode(),
+            REQUEST.replace(
+                "DTSTART:20260710T140000Z", "DTSTART:20260710T140000"
+            ).encode(),
             "invalid iMIP payload",
         ),
         (
