@@ -6,7 +6,6 @@ All calendar semantics live here in the mdcal layer; the substrate is reached
 only through the public `mddb.MDDB` API and raw SQL over `db.conn`.
 """
 
-import argparse
 import collections
 import datetime as _dt
 from zoneinfo import ZoneInfo
@@ -755,7 +754,6 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=(
 
     counts = {"created": 0, "updated": 0, "skipped": 0, "pruned": 0}
     actions = []
-    per_year = {}
     for year in sorted(by_year):
         created = updated = skipped = 0
         for card in by_year[year]:
@@ -772,7 +770,6 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=(
             else:
                 actions.append((card, cid))
                 updated += 1
-        per_year[year] = (created, updated, skipped)
         counts["created"] += created
         counts["updated"] += updated
         counts["skipped"] += skipped
@@ -818,53 +815,4 @@ def import_ics(deck, ics_path, source, uid=None, limit=None, prune=False, tags=(
                     editor.update(existing_card, summary=card.summary)
             for cid in stale:
                 editor.delete(cid)
-    for year, (created, updated, skipped) in per_year.items():
-        print(f"  {year}: +{created} ~{updated} ={skipped}")
     return counts
-
-
-def main(argv=None):
-    """Run the `mdcal-import` console script.
-
-    Parses the source `.ics`, then renders cards to stdout (``--dry-run``) or
-    imports them into the deck at ``--deck`` idempotently.
-
-    Args:
-        argv: Argument list for testing; defaults to ``sys.argv[1:]``.
-    """
-    parser = argparse.ArgumentParser(prog="mdcal-import")
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--ics", required=True)
-    parser.add_argument("--deck")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--limit", type=int)
-    parser.add_argument("--uid")
-    parser.add_argument("--prune", action="store_true")
-    parser.add_argument(
-        "--tag",
-        action="append",
-        default=[],
-        help="seed tag applied to created cards only (repeatable)",
-    )
-    args = parser.parse_args(argv)
-
-    if args.dry_run:
-        for vevent in _vevents(args.ics, args.uid, args.limit):
-            card = vevent_to_card(vevent, args.source)
-            card.tags = _seeded_tags(card.tags, args.tag)
-            print(f"# ===== {card.relpath} =====")
-            print(render_text(card))
-        return
-    if not args.deck:
-        parser.error("--deck is required unless --dry-run")
-    counts = import_ics(
-        args.deck, args.ics, args.source, args.uid, args.limit, args.prune, args.tag
-    )
-    print(
-        f"created={counts['created']} updated={counts['updated']} "
-        f"skipped={counts['skipped']} pruned={counts['pruned']}"
-    )
-
-
-if __name__ == "__main__":
-    main()

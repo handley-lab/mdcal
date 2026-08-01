@@ -11,7 +11,6 @@ from mdcal.ics import (
     RenderedCard,
     _ident,
     import_ics,
-    main,
     render_text,
     vevent_to_card,
 )
@@ -150,48 +149,13 @@ def test_render_text_frontmatter_then_body(ics_sample):
     assert "```ics" in text
 
 
-def test_main_dry_run_writes_nothing(ics_sample, tmp_path, capsys):
-    ics = tmp_path / "research.ics"
-    ics.write_text(ics_sample)
-    deck = tmp_path / "deck"
-    main(["--source", "research", "--ics", str(ics), "--deck", str(deck), "--dry-run"])
-    out = capsys.readouterr().out
-    for title in ["Plain meeting", "Weekly standup", "Conference trip"]:
-        assert title in out
-    assert not deck.exists()
-
-
-def test_main_dry_run_uid_filters(ics_sample, tmp_path, capsys):
-    ics = tmp_path / "research.ics"
-    ics.write_text(ics_sample)
-    main(
-        [
-            "--source",
-            "research",
-            "--ics",
-            str(ics),
-            "--uid",
-            "plain-1@example.com",
-            "--dry-run",
-        ]
-    )
-    out = capsys.readouterr().out
-    assert "Plain meeting" in out and "Conference trip" not in out
-
-
-def test_main_requires_deck_without_dry_run(ics_sample, tmp_path):
-    ics = tmp_path / "research.ics"
-    ics.write_text(ics_sample)
-    with pytest.raises(SystemExit):
-        main(["--source", "research", "--ics", str(ics)])
-
-
-def test_import_creates(ics_sample, tmp_path):
+def test_import_creates(ics_sample, tmp_path, capsys):
     ics = tmp_path / "research.ics"
     ics.write_text(ics_sample)
     deck = str(tmp_path / "deck")
     counts = import_ics(deck, str(ics), "research")
     assert counts == {"created": 4, "updated": 0, "skipped": 0, "pruned": 0}
+    assert capsys.readouterr().out == ""
     assert _count(deck) == 4
     assert _count(deck, rrule="FREQ=WEEKLY;COUNT=6;BYDAY=MO") == 1
     assert _count(deck, recurrence_id="2024-01-15 13:00:00+00:00") == 1

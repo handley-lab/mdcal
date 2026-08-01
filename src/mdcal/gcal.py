@@ -16,7 +16,6 @@ libraries (the ``mdcal[gcal]`` extra); ``mdcal.ics``/``mdcal.window`` stay
 free of them.
 """
 
-import argparse
 import datetime as _dt
 import json as _json
 import re as _re
@@ -189,7 +188,7 @@ def export_ics(credentials, calendar_id):
     credential to, the OAuth API replaces the secret-iCal-URL feed — no
     per-calendar read token to harvest, store, or rotate. Returns the same
     kind of full-span VCALENDAR the secret feed serves, so the existing
-    ``mdcal-import --prune`` consumes it unchanged.
+    :func:`mdcal.ics.import_ics` consumes it unchanged.
 
     The identity set is reconstructed to MATCH Google's own ICS export, not
     the raw API item stream (verified against the research feed): the API
@@ -974,28 +973,3 @@ def _recurrence_lines(body):
         for line in unfolded.split("\n")
         if line.startswith(("RRULE", "EXDATE", "RDATE"))
     ]
-
-
-def main(argv=None):
-    """Run the ``mdcal-pull`` console script: API-export a calendar as ICS.
-
-    Prints the synthesized VCALENDAR to stdout, ready for
-    ``mdcal-import --ics`` — the owned-calendar replacement for curling a
-    secret feed URL.
-
-    Args:
-        argv: Argument list for testing; defaults to ``sys.argv[1:]``.
-    """
-    from google.oauth2.credentials import Credentials
-
-    parser = argparse.ArgumentParser(prog="mdcal-pull")
-    parser.add_argument("--calendar-id", required=True)
-    parser.add_argument("--credentials", default="/etc/mdcal/google.json")
-    args = parser.parse_args(argv)
-    with open(args.credentials) as f:
-        credentials = Credentials(None, **_json.load(f))
-    print(export_ics(credentials, args.calendar_id))
-
-
-if __name__ == "__main__":
-    main()

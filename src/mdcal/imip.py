@@ -15,11 +15,9 @@ The mail fetch, the GTD-inbox surface, and the actual send are the caller's job
 event locally via :func:`mdcal.ics.vevent_to_card`.
 """
 
-import argparse
 import copy
 import datetime as _dt
 import hashlib
-import sys
 from dataclasses import dataclass
 from email.headerregistry import Address
 from email.message import EmailMessage
@@ -351,49 +349,3 @@ def build_reply_email(ics_text, attendee, response, cn=None, dtstamp=None):
         reply_ics, subtype="calendar", params={"method": "REPLY", "charset": "UTF-8"}
     )
     return msg
-
-
-def main(argv=None):
-    """Run the ``mdcal-reply`` console script.
-
-    Reads a REQUEST `.ics` (``--ics`` or stdin) and either prints the invitation
-    summary (``--show``) or emits the REPLY — the raw `.ics` (default) or the full
-    email (``--email``) — to stdout for the caller to send.
-
-    Args:
-        argv: Argument list for testing; defaults to ``sys.argv[1:]``.
-    """
-    parser = argparse.ArgumentParser(prog="mdcal-reply")
-    parser.add_argument("--ics", help="REQUEST .ics path (default: stdin)")
-    parser.add_argument(
-        "--show", action="store_true", help="print the invite summary, no reply"
-    )
-    parser.add_argument("--response", choices=sorted(PARTSTATS))
-    parser.add_argument(
-        "--attendee", help="responder email (the reply's From/ATTENDEE)"
-    )
-    parser.add_argument("--cn", help="responder display name")
-    parser.add_argument(
-        "--email",
-        action="store_true",
-        help="emit the full REPLY email, not just the .ics",
-    )
-    args = parser.parse_args(argv)
-
-    ics_text = sys.stdin.read() if args.ics is None else open(args.ics).read()
-
-    if args.show:
-        inv = parse_request(ics_text)
-        where = f" @ {inv.location}" if inv.location else ""
-        print(f"{inv.summary}{where}\n  when: {inv.dtstart}\n  from: {inv.organiser}")
-        return
-    if not args.response or not args.attendee:
-        parser.error("--response and --attendee are required unless --show")
-    if args.email:
-        print(build_reply_email(ics_text, args.attendee, args.response, cn=args.cn))
-    else:
-        print(build_reply(ics_text, args.attendee, args.response, cn=args.cn))
-
-
-if __name__ == "__main__":
-    main()

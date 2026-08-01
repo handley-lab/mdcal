@@ -7,3 +7,20 @@ Part of a broader de-Googling of an agentic system: you own your calendar data; 
 ## Status
 
 Early prototype — design in progress.
+
+## Python API
+
+Calendar operations compose directly from Python values:
+
+```python
+from mdcal.gcal import export_ics
+from mdcal.ics import import_ics
+from mdcal.imip import build_reply_email
+
+ics = export_ics(credentials, calendar_id)
+counts = import_ics(deck, ics_path, source, prune=True, tags=("area/work",))
+reply = build_reply_email(request_ics, attendee, "accept")
+```
+
+Fetching, scheduling, and sending belong to their deployment boundaries; mdcal
+does not install console commands for semantic calendar operations.
