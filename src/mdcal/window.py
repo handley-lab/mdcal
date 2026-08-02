@@ -79,7 +79,7 @@ def _concrete(db, start_epoch, end_epoch, hide):
     out = []
     for yaml_text, body in rows:
         card = _card(yaml_text, body)
-        if card.yaml["event_status"] == "CANCELLED":
+        if card.yaml["status"] == "CANCELLED":
             continue
         hidden = hide(card, instant_epoch(card.yaml["dtstart"]))
         out.append(
@@ -190,7 +190,7 @@ def _masters(db, start_epoch, end_epoch):
 
 
 def _expand_master(card, start, end, start_epoch, end_epoch, suppression, hide):
-    if card.yaml["event_status"] == "CANCELLED":
+    if card.yaml["status"] == "CANCELLED":
         return []
     dtstart = card.yaml["dtstart"]
     duration = card.yaml["dtend"] - dtstart

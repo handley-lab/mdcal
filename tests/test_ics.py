@@ -142,7 +142,8 @@ def test_render_text_frontmatter_then_body(ics_sample):
     assert text.startswith("---\n")
     front = text.split("---\n")[1]
     keys = list(yaml.safe_load(front))
-    assert keys[:4] == ["id", "title", "summary", "source"]
+    assert keys[:5] == ["id", "title", "summary", "kind", "source"]
+    assert yaml.safe_load(front)["kind"] == "event"
     parsed = yaml.safe_load(front)
     assert parsed["title"] == "Plain meeting"
     assert parsed["uid"] == "plain-1@example.com"
@@ -389,7 +390,7 @@ def test_prune_spares_local_and_other_sources(ics_sample, tmp_path):
                 "source": "local",
                 "uid": "l@x",
                 "all_day": False,
-                "event_status": "CONFIRMED",
+                "status": "CONFIRMED",
             },
             relpath="2024-01-01-local-abc.md",
         )
@@ -570,3 +571,22 @@ def test_guarded_missing_lm_raises_even_when_unchanged(ics_sample, tmp_path):
     )
     with pytest.raises(ValueError, match="LAST-MODIFIED"):
         import_ics(deck, str(ics), "research")
+
+
+def test_event_and_gtd_status_coexist_in_one_deck(ics_sample, tmp_path):
+    """A task's `status: next` and an event's `status: CONFIRMED` share a deck."""
+    ics = tmp_path / "research.ics"
+    ics.write_text(ics_sample)
+    deck = str(tmp_path / "deck")
+    import_ics(deck, str(ics), "research")
+    db = mddb.MDDB(deck)
+    with db.editor(rationale="a task beside the events") as e:
+        task = e.create(
+            title="Call dentist", summary="", kind="task", yaml={"status": "next"}
+        )
+    kinds = {row["kind"] for row in db.list()}
+    assert kinds == {"event", "task"}
+    assert db.read(task.id).yaml["status"] == "next"
+    events = [row["id"] for row in db.list() if row["kind"] == "event"]
+    assert all(db.read(cid).yaml["status"] == "CONFIRMED" for cid in events)
+    assert import_ics(deck, str(ics), "research")["updated"] == 0

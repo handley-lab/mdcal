@@ -89,7 +89,7 @@ def card_event_json(card, start, end):
         "all_day": yaml["all_day"],
         "location": yaml.get("location"),
         "tzid": yaml.get("tzid"),
-        "status": yaml["event_status"],
+        "status": yaml["status"],
         "rrule": yaml.get("rrule"),
         "description": description_of(card.body),
         "organizer": yaml.get("organizer"),
@@ -125,7 +125,7 @@ def occurrence_json(occurrence, synced=()):
     Returns:
         A JSON-ready dict with keys ``id``, ``uid``, ``title``, ``start``,
         ``end``, ``dtstart``, ``dtend``, ``all_day``, ``recurring``,
-        ``location``, ``tzid``, ``status`` (the card's ``event_status``),
+        ``location``, ``tzid``, ``status`` (the card's ``status``),
         ``rrule``, ``description``, ``editable``, ``tags`` (``[]`` when
         absent — the client's area toggles read them), ``hidden`` (the
         resolver's computed per-occurrence hide flag — series/point/ray —

@@ -435,7 +435,7 @@ def test_synced_delete_cancels_instead_of_deleting(deck, synced):
     ((_, uid),) = synced.deletes
     card = _card_of(deck, card_id)
     assert card.yaml["uid"] == uid
-    assert card.yaml["event_status"] == "CANCELLED"
+    assert card.yaml["status"] == "CANCELLED"
     assert card.yaml["dispatched"] == synced.stamp
     assert card.summary.startswith("[cancelled]")
     assert _window(deck, 2024, 6, 3, 2024, 6, 4, synced=synced.map) == []
@@ -496,7 +496,7 @@ def test_synced_series_delete_cancels_exception_cards_too(deck, synced):
     assert len(synced.deletes) == 1
     for each in (card_id, exc_id):
         card = _card_of(deck, each)
-        assert card.yaml["event_status"] == "CANCELLED"
+        assert card.yaml["status"] == "CANCELLED"
         assert card.yaml["dispatched"] == synced.stamp
     assert _window(deck, 2024, 6, 3, 2024, 7, 1, synced=synced.map) == []
 
@@ -569,7 +569,7 @@ def test_synced_cancel_preserves_local_tags(deck, synced):
         e.update(card, summary=card.summary, tags=["area/research"])
     delete_event(deck, card_id, "event", **synced.kw)
     card = _card_of(deck, card_id)
-    assert card.yaml["event_status"] == "CANCELLED"
+    assert card.yaml["status"] == "CANCELLED"
     assert card.yaml["tags"] == ["area/research"]
 
 
@@ -626,7 +626,7 @@ def test_synced_delete_conflicts_when_card_races(deck, synced):
             gapi=_gapi(synced, delete=racing_delete),
         )
     card = _card_of(deck, card_id)
-    assert card.title == "Racer won" and card.yaml["event_status"] != "CANCELLED"
+    assert card.title == "Racer won" and card.yaml["status"] != "CANCELLED"
 
 
 def test_synced_edit_tolerates_unrelated_commits(deck, synced):
@@ -1035,9 +1035,9 @@ def test_undo_synced_delete_restores_confirmed(deck, synced):
     token = undo_token(deck)
     undo_event(token["deck"], token["commit"], **synced.kw)
     card = _card_of(deck, card_id)
-    assert card.yaml["event_status"] == "CONFIRMED"
+    assert card.yaml["status"] == "CONFIRMED"
     assert card.yaml["dispatched"] == synced.stamp
-    assert synced.pushes[-1][1].yaml["event_status"] == "CONFIRMED"
+    assert synced.pushes[-1][1].yaml["status"] == "CONFIRMED"
 
 
 def test_undo_synced_override_create_resets_instance(deck, synced):
@@ -1062,7 +1062,7 @@ def test_undo_synced_override_create_resets_instance(deck, synced):
     assert len(synced.patches) == 2
     reset = synced.patches[-1][3]
     assert str(reset.yaml["dtstart"]).startswith("2024-06-10 09:00")
-    assert reset.yaml["event_status"] == "CONFIRMED"
+    assert reset.yaml["status"] == "CONFIRMED"
     assert mdcal.events.description_of(reset.body) == description
     starts = [
         o["start"] for o in _window(deck, 2024, 6, 10, 2024, 6, 11, synced=synced.map)
@@ -1903,14 +1903,14 @@ def test_synced_delete_from_cancels_instances_before_truncating(deck, synced):
         gapi=_gapi(synced, push=push, patch=patch),
     )
     assert [kind for kind, _ in order] == ["patch", "push"]
-    assert order[0][1].yaml["event_status"] == "CANCELLED"
+    assert order[0][1].yaml["status"] == "CANCELLED"
     assert "UNTIL" in order[1][1].yaml["rrule"]
     assert order[1][1].yaml["sequence"] == before_seq + 1
     master = _card_of(deck, card_id)
     assert master.yaml["sequence"] == before_seq + 1
     assert master.yaml["dispatched"] == synced.stamp
     over = _card_of(deck, override_id)
-    assert over.yaml["event_status"] == "CANCELLED"
+    assert over.yaml["status"] == "CANCELLED"
     assert over.yaml["dispatched"] == synced.stamp
     assert [
         o["start"] for o in _window(deck, 2024, 6, 1, 2024, 7, 1, synced=synced.map)
@@ -2024,8 +2024,8 @@ def test_undo_synced_delete_from_restores_master_and_instance(deck, synced):
     assert "UNTIL" not in master.yaml["rrule"]
     assert master.yaml["dispatched"] == synced.stamp
     over = _card_of(deck, override_id)
-    assert over.yaml["event_status"] == "CONFIRMED"
-    assert synced.patches[-1][3].yaml["event_status"] == "CONFIRMED"
+    assert over.yaml["status"] == "CONFIRMED"
+    assert synced.patches[-1][3].yaml["status"] == "CONFIRMED"
     starts = sorted(
         o["start"] for o in _window(deck, 2024, 6, 1, 2024, 7, 1, synced=synced.map)
     )

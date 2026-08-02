@@ -15,9 +15,10 @@ meanings. Calendar fields are flat YAML indexed through mddb. The exact set
 owned by a calendar re-render is `mdcal.ics.EVENT_KEYS`.
 
 `uid` is iCalendar identity and is distinct from the card's mddb `id`. Import
-identity includes source, UID, and recurrence ID. `event_status` stores VEVENT
-`STATUS`; bare `status` remains available to the GTD vocabulary when layers
-cohabit one card.
+identity includes source, UID, and recurrence ID. `status` stores VEVENT
+`STATUS`. The substrate's `kind` says which vocabulary owns a card, so `status`
+means VEVENT `STATUS` on `kind: event` and a GTD state on `kind: task`, and
+each layer reads only its own cards.
 
 Tags become deck-owned after card creation. Imported categories and feed tags
 may seed them, but a later source re-render does not replace local
