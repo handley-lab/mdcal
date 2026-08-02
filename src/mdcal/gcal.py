@@ -687,7 +687,7 @@ def _fields_body(card):
     yaml = card.yaml
     body = {
         "summary": card.title,
-        "status": _enum(yaml["event_status"], _GOOGLE_STATUS, "event status"),
+        "status": _enum(yaml["status"], _GOOGLE_STATUS, "event status"),
     }
     if yaml["all_day"]:
         body["start"] = {"date": yaml["dtstart"].isoformat()}

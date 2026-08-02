@@ -23,6 +23,7 @@ from dateutil.rrule import rrulestr
 from slugify import slugify
 
 EVENT_KEYS = (
+    "kind",
     "source",
     "uid",
     "recurrence_id",
@@ -33,7 +34,7 @@ EVENT_KEYS = (
     "dtend_epoch",
     "all_day",
     "tzid",
-    "event_status",
+    "status",
     "transp",
     "sequence",
     "rrule",
@@ -68,11 +69,13 @@ creation, after which tags are deck-owned local classification — no re-render
 path may pass ``tags=`` to ``editor.update``, so retags (``area/*``,
 ``mdcal/hidden``) survive every upstream change.
 
-``event_status`` is the STORAGE name for iCalendar ``STATUS`` — the bare
-``status`` key belongs to the GTD vocabulary (mdgtd), and one card may carry
-both vocabularies. The external names are unchanged: the ICS property stays
-``STATUS``, the Google Events API field stays ``status``, and the nested
-attendee ``status`` (PARTSTAT) is display data, unindexed and unowned.
+``status`` stores iCalendar ``STATUS``. It shares the key with the GTD
+vocabulary without ambiguity because ``kind`` says which vocabulary owns the
+card: mdgtd reads ``status`` on ``kind: task`` and ``kind: project``, mdcal
+on ``kind: event``, and neither touches the other's cards. The external names
+are unchanged: the ICS property stays ``STATUS``, the Google Events API field
+stays ``status``, and the nested attendee ``status`` (PARTSTAT) is display
+data, unindexed and unowned.
 """
 
 GRACE = _dt.timedelta(hours=1)
@@ -300,6 +303,7 @@ def vevent_to_card(vevent, source):
 
     status = str(vevent["STATUS"]) if vevent.get("STATUS") else "CONFIRMED"
     yaml = {
+        "kind": "event",
         "source": source,
         "uid": uid,
         "recurrence_id": recurrence_id,
@@ -312,7 +316,7 @@ def vevent_to_card(vevent, source):
         "dtend_epoch": dtend_epoch,
         "all_day": all_day,
         "tzid": tzid,
-        "event_status": status,
+        "status": status,
         "transp": str(vevent["TRANSP"]) if vevent.get("TRANSP") else None,
         "sequence": int(vevent["SEQUENCE"])
         if vevent.get("SEQUENCE") is not None
