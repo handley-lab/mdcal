@@ -125,10 +125,10 @@ when an occurrence must be findable.
 ## Subscribed external feeds (e.g. GAMBIT) — read-only subset now, base + overlay later
 
 A feed is a `.ics` URL polled periodically into a deck. **The implemented subset (feed-sync
-slice) is read-only ingest**: the fetcher is `curl` + the `mdcal-import` CLI on a systemd timer
-(composition, not a Python fetcher module — the Python lives in `import_ics` itself), writing
+slice) is read-only ingest**: a systemd timer fetches each feed and calls
+`mdcal.ics.import_ics`, writing
 ordinary flat importer cards keyed `source + uid + recurrence_id`, with **prune-on-absent**
-(`mdcal-import --prune`): a card of that source absent from the fetched feed's identity set is
+(`import_ics(..., prune=True)`): a card of that source absent from the fetched feed's identity set is
 deleted, git history serving as the tombstone. Prune is only sound against a feed serving the
 calendar's **full historical span** — verified per feed before it ships (both Google URL
 flavours checked live: spans back to the oldest events, counts matching the deck). The layer
@@ -137,8 +137,8 @@ invariant keeps prune nearly lossless: event CONTENT is read-only on feed-source
 (`mdcal/hidden`, `area/*`) are writable, survive re-render because tags are deck-owned
 after creation, and do NOT survive upstream deletion (prune takes the card, tags included;
 the base+overlay/tombstone slice below stays deferred for annotations that must outlive
-upstream deletion). `--prune` refuses
-`--uid`/`--limit` — a partial import's identity set would mass-delete the unselected remainder.
+upstream deletion). `prune=True` refuses `uid` or `limit` — a partial import's
+identity set would mass-delete the unselected remainder.
 
 Google's ICS endpoints send **no ETag / no Last-Modified** (`cache-control: no-store`), so
 conditional GET is impossible — and feeds are never even byte-stable: measured across paired
@@ -151,7 +151,7 @@ flat yaml's `created`/`last_modified` come from the stable CREATED/LAST-MODIFIED
 polling ships only after a captured re-fetch pair imports as create-then-no-op. Feed URLs come in two
 flavours: *public* (`…/ical/<id>/public/basic.ics`) and per-user *secret*
 (`…/ical/<id>/private-<token>/basic.ics`). Secret URLs are NOT used for calendars we hold the
-OAuth credential to — owned calendars pull via `mdcal-pull` (§Sync pipe 2), so no per-calendar
+OAuth credential to — owned calendars pull via `mdcal.gcal.export_ics` (§Sync pipe 2), so no per-calendar
 secret read token is harvested or committed; a URL feed line is only for genuinely external
 sources (public calendars, third-party `.ics`).
 
@@ -174,10 +174,10 @@ overlays land. `STATUS:CANCELLED` already stays as a card (the resolver hides it
    `conflict_rationales()`. The conflict scanner must work at git/filesystem level, because invalid
    YAML makes `db.read`/rebuild raise *before* the grid can query.
 2. **Feed = ICS pull inbound; for *synced* sources, Google API write-through outbound.** Inbound
-   is `curl` + the `mdcal-import` CLI on a timer for EXTERNAL feeds; for calendars we hold the
-   OAuth credential to (Will-owned), `mdcal-pull` replaces `curl`: it API-exports the calendar
+   fetches external URLs and calls `mdcal.ics.import_ics`; for calendars we hold the
+   OAuth credential to (Will-owned), `mdcal.gcal.export_ics` API-exports the calendar
    (`events.list`, `singleEvents=false`, full-span, paginated to exhaustion — a failed page
-   raises before any output, so `--prune` never sees a partial identity set) and synthesizes the
+   raises before returning, so prune never sees a partial identity set) and synthesizes the
    same VCALENDAR shape the secret feed serves. Verified byte-equivalent for import identity on
    the research calendar (3,880/3,880 `(uid, recurrence_id)` match): cancelled recurring
    instances — API-served as `status: cancelled` child resources — fold into master `EXDATE`s
@@ -232,7 +232,7 @@ wait for the substrate (both reviewers converged on this independently):
 
 Source = a Google Calendar **`.ics` document** — either the raw `.ics` export/feed (external
 URL feeds; the historical migration export), or, for owned calendars, the VCALENDAR that
-`mdcal-pull` synthesizes from the API (`events.list` with `singleEvents=false` returns masters
+`mdcal.gcal.export_ics` synthesizes from the API (`events.list` with `singleEvents=false` returns masters
 plus `RECURRENCE-ID` exception resources — the early note that "the API returns expanded
 instances, not masters" described the default `singleEvents=true` mode and the MCP wrapper,
 not the API's capability; see §Sync pipe 2 for what the synthesis preserves and drops). Either
