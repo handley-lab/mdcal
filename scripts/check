@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+pre-commit run --all-files --show-diff-on-failure
+PYTHONPATH=src python -m pytest
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+python -m build --outdir "$tmp"
+python -m twine check "$tmp"/*
