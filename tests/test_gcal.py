@@ -464,11 +464,11 @@ def test_patch_instance_no_master_raises(monkeypatch):
         gcal.patch_instance(None, "cal@x", "gone@x", dt.date(2026, 7, 9), card)
 
 
-def _occurrence(start, end, uid="o@x", extra=""):
+def _occurrence(start, end, uid="o@x", extra="", location="The Alma"):
     from mdcal.window import Occurrence
 
     card = _card(
-        f"UID:{uid}\nSUMMARY:Quiz\nLOCATION:The Alma\nDESCRIPTION:Team Will.\n"
+        f"UID:{uid}\nSUMMARY:Quiz\nLOCATION:{location}\nDESCRIPTION:Team Will.\n"
         "ATTENDEE;CN=Sam:mailto:sam@example.com\n"
         "DTSTART;TZID=Europe/London:20261022T200000\n"
         f"DTEND;TZID=Europe/London:20261022T230000\nSTATUS:CONFIRMED{extra}"
@@ -499,6 +499,16 @@ def test_occurrence_event_carries_only_title_time_and_place():
     )
     assert later_id != event_id
     assert gcal.occurrence_event(_occurrence(start, start))[0] == event_id
+
+
+def test_occurrence_event_drops_a_meeting_link_location():
+    from mdcal import gcal
+
+    start = dt.datetime(2026, 11, 19, 21, 0, tzinfo=dt.timezone.utc)
+    _, body = gcal.occurrence_event(
+        _occurrence(start, start, location="https://queensu.zoom.us/j/9348")
+    )
+    assert body["location"] is None
 
 
 def test_occurrence_event_all_day():

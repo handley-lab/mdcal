@@ -191,7 +191,8 @@ def occurrence_event(occurrence):
 
     The body deliberately carries nothing else — no description, attendees,
     conference or recurrence — so a projection shows when and where without
-    disclosing the card's contents or third parties' details.
+    disclosing the card's contents or third parties' details. A location
+    holding a URL is a meeting link, not a place, and is dropped.
 
     Args:
         occurrence: An `mdcal.window.Occurrence`.
@@ -209,11 +210,12 @@ def occurrence_event(occurrence):
     else:
         start = {"date": occurrence.start.isoformat()}
         end = {"date": occurrence.end.isoformat()}
+    location = yaml.get("location") or None
     body = {
         "summary": occurrence.card.title,
         "start": start,
         "end": end,
-        "location": yaml.get("location") or None,
+        "location": None if location and "://" in location else location,
         "status": "confirmed",
     }
     return event_id, body
