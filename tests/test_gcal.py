@@ -505,10 +505,27 @@ def test_occurrence_event_drops_a_meeting_link_location():
     from mdcal import gcal
 
     start = dt.datetime(2026, 11, 19, 21, 0, tzinfo=dt.timezone.utc)
+    for link in (
+        "https://queensu.zoom.us/j/9348",
+        "Zoom: willhandley.co.uk/zoom",
+        "meet.jit.si/superrnest-mnras-discussion",
+    ):
+        _, body = gcal.occurrence_event(_occurrence(start, start, location=link))
+        assert body["location"] is None
     _, body = gcal.occurrence_event(
-        _occurrence(start, start, location="https://queensu.zoom.us/j/9348")
+        _occurrence(start, start, location="Old Courts, Gonville & Caius")
     )
-    assert body["location"] is None
+    assert body["location"] == "Old Courts, Gonville & Caius"
+
+
+def test_occurrence_event_id_distinguishes_sources_sharing_a_uid():
+    from mdcal import gcal
+
+    start = dt.datetime(2026, 11, 19, 21, 0, tzinfo=dt.timezone.utc)
+    occurrence = _occurrence(start, start)
+    other = _occurrence(start, start)
+    other.card.yaml["source"] = "travel"
+    assert gcal.occurrence_event(occurrence)[0] != gcal.occurrence_event(other)[0]
 
 
 def test_occurrence_event_all_day():

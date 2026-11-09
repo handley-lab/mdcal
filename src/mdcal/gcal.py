@@ -186,23 +186,28 @@ def delete_event(credentials, calendar_id, uid):
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
 
 
+_LINK = _re.compile(r"://|\b[\w-]+(?:\.[\w-]+)+/\S")
+
+
 def occurrence_event(occurrence):
     """Map one window occurrence to a single Google event: title, time, place.
 
     The body deliberately carries nothing else — no description, attendees,
     conference or recurrence — so a projection shows when and where without
     disclosing the card's contents or third parties' details. A location
-    holding a URL is a meeting link, not a place, and is dropped.
+    holding a URL or a bare ``domain.tld/path`` is a meeting link, not a
+    place, and is dropped.
 
     Args:
         occurrence: An `mdcal.window.Occurrence`.
 
     Returns:
         ``(event_id, body)``: a stable Google event id derived from the card's
-        ``uid`` and this occurrence's start, and the event resource.
+        ``source`` and ``uid`` and this occurrence's start, and the event
+        resource.
     """
     yaml = occurrence.card.yaml
-    key = f"{yaml['uid']}\0{occurrence.start.isoformat()}".encode()
+    key = f"{yaml['source']}\0{yaml['uid']}\0{occurrence.start.isoformat()}".encode()
     event_id = _b32hex(_hashlib.sha1(key).digest()).decode().lower()
     if isinstance(occurrence.start, _dt.datetime):
         start = {"dateTime": occurrence.start.isoformat()}
@@ -215,7 +220,7 @@ def occurrence_event(occurrence):
         "summary": occurrence.card.title,
         "start": start,
         "end": end,
-        "location": None if location and "://" in location else location,
+        "location": None if location and _LINK.search(location) else location,
         "status": "confirmed",
     }
     return event_id, body
