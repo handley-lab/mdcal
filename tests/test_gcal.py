@@ -477,3 +477,25 @@ def test_patch_instance_no_slot_raises(monkeypatch):
     monkeypatch.setattr(gcal, "_service", lambda credentials: recorder)
     with pytest.raises(ValueError, match="no instance of"):
         gcal.patch_instance(None, "cal@x", "series@x", dt.date(2026, 7, 9), card)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_export_multiline_conference_notes_roundtrip(monkeypatch, newline):
+    from mdcal import gcal
+
+    notes = f"Join here,{newline}bring notes; path C:\\meeting"
+    item = _gitem(
+        "notes@x",
+        {"date": "2026-02-01"},
+        {"date": "2026-02-02"},
+        conferenceData={
+            "entryPoints": [{"entryPointType": "video", "uri": "https://example.org"}],
+            "notes": notes,
+        },
+    )
+    fake = _FakeExportService(pages=[[item]])
+    monkeypatch.setattr(gcal, "_service", lambda credentials: fake)
+    payload = gcal.export_ics(None, "cal")
+    (vevent,) = icalendar.Calendar.from_ical(payload).walk("VEVENT")
+    card = vevent_to_card(vevent, "research")
+    assert _event_body(card)["conferenceData"]["notes"] == notes.replace("\r\n", "\n")
