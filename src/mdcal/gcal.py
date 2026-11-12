@@ -550,7 +550,11 @@ def _item_to_vevent(item, excluded, default_tz, master_zone, calendar_id):
         if data.get("conferenceId"):
             vevent.add("X-GOOGLE-CONFERENCE-ID", data["conferenceId"])
         if data.get("notes"):
-            vevent.add("X-GOOGLE-CONFERENCE-NOTES", data["notes"])
+            vevent.add(
+                "X-GOOGLE-CONFERENCE-NOTES",
+                icalendar.vText(data["notes"]),
+                parameters={"VALUE": "TEXT"},
+            )
         if data.get("conferenceSolution"):
             solution = data["conferenceSolution"]
             _known(solution, "conference solution")
