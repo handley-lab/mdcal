@@ -49,6 +49,11 @@ replacement representation would erase information Google owns. An
 `attendeesOmitted` response cannot seed a new event because its guest list is
 known incomplete.
 
+A one-way mirror publishes chosen window occurrences, each as a single event
+carrying only title, times and location, into a Google calendar that nothing
+else writes. Event ids derive from the card UID and occurrence start, so the
+mirror reconciles to exactly the chosen set; selection is deployment policy.
+
 iMIP functions construct and inspect calendar payloads but never fetch mail or
 send a reply. Invitation decisions and mail proposals belong to their deployment
 capability boundaries.

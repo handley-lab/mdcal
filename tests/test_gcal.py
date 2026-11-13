@@ -464,6 +464,165 @@ def test_patch_instance_no_master_raises(monkeypatch):
         gcal.patch_instance(None, "cal@x", "gone@x", dt.date(2026, 7, 9), card)
 
 
+def _occurrence(start, end, uid="o@x", extra="", location="The Alma"):
+    from mdcal.window import Occurrence
+
+    card = _card(
+        f"UID:{uid}\nSUMMARY:Quiz\nLOCATION:{location}\nDESCRIPTION:Team Will.\n"
+        "ATTENDEE;CN=Sam:mailto:sam@example.com\n"
+        "DTSTART;TZID=Europe/London:20261022T200000\n"
+        f"DTEND;TZID=Europe/London:20261022T230000\nSTATUS:CONFIRMED{extra}"
+    )
+    return Occurrence(card, start, end, False)
+
+
+def test_occurrence_event_carries_only_title_time_and_place():
+    from mdcal import gcal
+
+    bst = dt.timezone(dt.timedelta(hours=1))
+    start = dt.datetime(2026, 10, 22, 20, 0, tzinfo=bst)
+    event_id, body = gcal.occurrence_event(
+        _occurrence(start, start + dt.timedelta(hours=3))
+    )
+    assert body == {
+        "summary": "Quiz",
+        "start": {"dateTime": "2026-10-22T20:00:00+01:00"},
+        "end": {"dateTime": "2026-10-22T23:00:00+01:00"},
+        "location": "The Alma",
+        "status": "confirmed",
+    }
+    assert len(event_id) == 32 and set(event_id) <= set(
+        "0123456789abcdefghijklmnopqrstuv"
+    )
+    later_id, _ = gcal.occurrence_event(
+        _occurrence(start + dt.timedelta(days=7), start + dt.timedelta(days=7, hours=3))
+    )
+    assert later_id != event_id
+    assert gcal.occurrence_event(_occurrence(start, start))[0] == event_id
+
+
+def test_occurrence_event_drops_a_meeting_link_location():
+    from mdcal import gcal
+
+    start = dt.datetime(2026, 11, 19, 21, 0, tzinfo=dt.timezone.utc)
+    for link in (
+        "https://queensu.zoom.us/j/9348",
+        "Zoom: willhandley.co.uk/zoom",
+        "meet.jit.si/superrnest-mnras-discussion",
+    ):
+        _, body = gcal.occurrence_event(_occurrence(start, start, location=link))
+        assert body["location"] is None
+    _, body = gcal.occurrence_event(
+        _occurrence(start, start, location="Old Courts, Gonville & Caius")
+    )
+    assert body["location"] == "Old Courts, Gonville & Caius"
+
+
+def test_occurrence_event_id_distinguishes_sources_sharing_a_uid():
+    from mdcal import gcal
+
+    start = dt.datetime(2026, 11, 19, 21, 0, tzinfo=dt.timezone.utc)
+    occurrence = _occurrence(start, start)
+    other = _occurrence(start, start)
+    other.card.yaml["source"] = "travel"
+    assert gcal.occurrence_event(occurrence)[0] != gcal.occurrence_event(other)[0]
+
+
+def test_occurrence_event_all_day():
+    from mdcal import gcal
+
+    _, body = gcal.occurrence_event(
+        _occurrence(dt.date(2026, 11, 14), dt.date(2026, 11, 15))
+    )
+    assert body["start"] == {"date": "2026-11-14"}
+    assert body["end"] == {"date": "2026-11-15"}
+
+
+class _MirrorService:
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.calls = []
+
+    def events(self):
+        return self
+
+    def list(self, **kw):
+        assert kw["showDeleted"] is True
+        return _Result(self.pages.pop(0))
+
+    def insert(self, **kw):
+        self.calls.append(("insert", kw["body"]["id"], kw["body"]))
+        return _Result({})
+
+    def update(self, **kw):
+        self.calls.append(("update", kw["eventId"], kw["body"]))
+        return _Result({})
+
+    def delete(self, **kw):
+        self.calls.append(("delete", kw["eventId"], None))
+        return _Result({})
+
+
+def test_mirror_events_reconciles_to_exactly_the_given_events(monkeypatch):
+    from mdcal import gcal
+
+    def body(summary, start="2026-10-22T20:00:00+01:00"):
+        return {
+            "summary": summary,
+            "start": {"dateTime": start},
+            "end": {"dateTime": "2026-10-22T23:00:00+01:00"},
+            "location": None,
+            "status": "confirmed",
+        }
+
+    def item(event_id, summary, start, status="confirmed"):
+        return {
+            "id": event_id,
+            "summary": summary,
+            "start": {"dateTime": start, "timeZone": "Europe/London"},
+            "end": {"dateTime": "2026-10-22T22:00:00Z"},
+            "status": status,
+        }
+
+    service = _MirrorService(
+        [
+            {
+                "items": [
+                    item("same", "Quiz", "2026-10-22T19:00:00Z"),
+                    item("retitled", "Old title", "2026-10-22T19:00:00Z"),
+                ],
+                "nextPageToken": "p2",
+            },
+            {
+                "items": [
+                    item("revived", "Quiz", "2026-10-22T19:00:00Z", "cancelled"),
+                    item("stale", "Gone", "2026-10-22T19:00:00Z"),
+                    item("tombstone", "Gone", "2026-10-22T19:00:00Z", "cancelled"),
+                ]
+            },
+        ]
+    )
+    monkeypatch.setattr(gcal, "_service", lambda credentials: service)
+    counts = gcal.mirror_events(
+        None,
+        "cal@x",
+        {
+            "same": body("Quiz"),
+            "retitled": body("New title"),
+            "revived": body("Quiz"),
+            "fresh": body("Dinner"),
+        },
+    )
+    assert counts == {"created": 1, "updated": 2, "deleted": 1, "unchanged": 1}
+    assert [(op, event_id) for op, event_id, _ in service.calls] == [
+        ("update", "retitled"),
+        ("update", "revived"),
+        ("insert", "fresh"),
+        ("delete", "stale"),
+    ]
+    assert service.calls[2][2] == {"id": "fresh", **body("Dinner")}
+
+
 def test_patch_instance_no_slot_raises(monkeypatch):
     from mdcal import gcal
 

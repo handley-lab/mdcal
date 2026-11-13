@@ -1,4 +1,7 @@
-"""Google Calendar write-through for synced feed sources.
+"""Google Calendar write-through for synced feed sources, and one-way mirrors.
+
+`occurrence_event` and `mirror_events` project window occurrences into a
+calendar the caller owns outright; everything below concerns write-through.
 
 Pushes event cards to the Google Calendar API keyed on the card's own
 ``uid`` — merge-safe: an existing live master is PATCHED (owned fields with
@@ -17,7 +20,9 @@ free of them.
 """
 
 import datetime as _dt
+import hashlib as _hashlib
 import json as _json
+from base64 import b32hexencode as _b32hex
 import re as _re
 from urllib.parse import urlsplit as _urlsplit
 from zoneinfo import ZoneInfo
@@ -179,6 +184,118 @@ def delete_event(credentials, calendar_id, uid):
     if cancelled:
         return _watermark(cancelled[0]["updated"])
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
+
+
+_LINK = _re.compile(r"://|\b[\w-]+(?:\.[\w-]+)+/\S")
+
+
+def occurrence_event(occurrence):
+    """Map one window occurrence to a single Google event: title, time, place.
+
+    The body deliberately carries nothing else — no description, attendees,
+    conference or recurrence — so a projection shows when and where without
+    disclosing the card's contents or third parties' details. A location
+    holding a URL or a bare ``domain.tld/path`` is a meeting link, not a
+    place, and is dropped.
+
+    Args:
+        occurrence: An `mdcal.window.Occurrence`.
+
+    Returns:
+        ``(event_id, body)``: a stable Google event id derived from the card's
+        ``source`` and ``uid`` and this occurrence's start, and the event
+        resource.
+    """
+    yaml = occurrence.card.yaml
+    key = f"{yaml['source']}\0{yaml['uid']}\0{occurrence.start.isoformat()}".encode()
+    event_id = _b32hex(_hashlib.sha1(key).digest()).decode().lower()
+    if isinstance(occurrence.start, _dt.datetime):
+        start = {"dateTime": occurrence.start.isoformat()}
+        end = {"dateTime": occurrence.end.isoformat()}
+    else:
+        start = {"date": occurrence.start.isoformat()}
+        end = {"date": occurrence.end.isoformat()}
+    location = yaml.get("location") or None
+    body = {
+        "summary": occurrence.card.title,
+        "start": start,
+        "end": end,
+        "location": None if location and _LINK.search(location) else location,
+        "status": "confirmed",
+    }
+    return event_id, body
+
+
+def mirror_events(credentials, calendar_id, events):
+    """Make a Google calendar hold exactly ``events``, keyed by event id.
+
+    The calendar is wholly owned by the caller's projection: every live event
+    whose id is not in ``events`` is deleted, including any added by hand.
+    Missing events are inserted with their given id; an id Google still holds
+    as a cancelled tombstone (ids are never reusable) is revived by update.
+    Events whose title, location, status or start/end instants differ are
+    updated; the rest are left untouched.
+
+    Args:
+        credentials: A ``google.oauth2.credentials.Credentials``.
+        calendar_id: The projection's Google calendar id.
+        events: ``{event_id: body}`` as produced by `occurrence_event`.
+
+    Returns:
+        ``{"created", "updated", "deleted", "unchanged"}`` counts.
+    """
+    service = _service(credentials)
+    existing = {}
+    token = None
+    while True:
+        page = (
+            service.events()
+            .list(calendarId=calendar_id, showDeleted=True, pageToken=token)
+            .execute()
+        )
+        existing.update((item["id"], item) for item in page["items"])
+        token = page.get("nextPageToken")
+        if token is None:
+            break
+    counts = {"created": 0, "updated": 0, "deleted": 0, "unchanged": 0}
+    for event_id, body in events.items():
+        item = existing.get(event_id)
+        if item is None:
+            service.events().insert(
+                calendarId=calendar_id, body={"id": event_id, **body}
+            ).execute()
+            counts["created"] += 1
+        elif item["status"] == "cancelled" or not _same_event(item, body):
+            service.events().update(
+                calendarId=calendar_id, eventId=event_id, body=body
+            ).execute()
+            counts["updated"] += 1
+        else:
+            counts["unchanged"] += 1
+    for event_id, item in existing.items():
+        if event_id not in events and item["status"] != "cancelled":
+            service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+            counts["deleted"] += 1
+    return counts
+
+
+def _same_event(item, body):
+    """Whether a Google item already shows ``body``'s title, place, status and times."""
+    if (item.get("summary"), item.get("location"), item["status"]) != (
+        body["summary"],
+        body["location"],
+        body["status"],
+    ):
+        return False
+    for edge in ("start", "end"):
+        if "date" in body[edge]:
+            if item[edge].get("date") != body[edge]["date"]:
+                return False
+        elif "dateTime" not in item[edge] or _rfc3339(
+            item[edge]["dateTime"]
+        ) != _rfc3339(body[edge]["dateTime"]):
+            return False
+    return True
 
 
 def export_ics(credentials, calendar_id):
